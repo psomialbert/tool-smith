@@ -112,6 +112,11 @@ Phase 2 index repo without ever committing binaries.
 
 - Quarantined tool escape attempts blocked by sandbox: `touch $HOME/...` →
   `Operation not permitted`; `curl` → cannot resolve host; CWD write allowed.
+- Sandboxed runs (and self-tests) get a **sanitized environment**: only
+  PATH/TMPDIR/LANG/LC_*/TERM/TZ pass through, HOME points at a scratch dir,
+  tokens never reach Tier 0/2 code. Explicit forwarding:
+  `smith run --pass-env NAME[,NAME] <tool>` (visible in the command line, by
+  design). Tier 1 runs unsandboxed with the full environment.
 - Tampered binary (pin mismatch) → `smith run` refuses; `smith verify` flags it.
 - `smith promote` with stdin = pipe or `/dev/null` → refused (real `isatty`
   check via `x/term`; `os.ModeCharDevice` alone is bypassable by `/dev/null`).

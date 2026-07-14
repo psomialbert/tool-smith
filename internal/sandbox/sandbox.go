@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 //go:embed profiles/default.sb
@@ -26,6 +27,49 @@ func WriteDefaultProfile(profilesDir string) (string, error) {
 		}
 	}
 	return path, nil
+}
+
+// envAllowlist is the only parent environment that reaches a sandboxed
+// tool. Everything else — tokens, cloud creds, session identifiers — stays
+// out: the sandbox blocks network, but env -> file-in-CWD -> later read is
+// a real exfiltration channel.
+var envAllowlist = []string{"PATH", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ"}
+
+// linuxScratchHome lives inside the tmpfs bwrap mounts over /tmp; the
+// matching --dir flag in Command creates it inside the sandbox.
+const linuxScratchHome = "/tmp/smith-home"
+
+// Env builds the sanitized environment for a sandboxed run. HOME points at
+// a scratch dir (inside TMP, so the profile allows writes there). passEnv
+// names extra parent vars the caller explicitly chose to forward.
+func Env(passEnv []string) ([]string, error) {
+	var scratchHome string
+	if runtime.GOOS == "linux" {
+		scratchHome = linuxScratchHome
+	} else {
+		var err error
+		if scratchHome, err = os.MkdirTemp("", "smith-scratch-home-"); err != nil {
+			return nil, err
+		}
+	}
+	env := []string{"HOME=" + scratchHome, "SMITH_SANDBOX=1"}
+	for _, k := range envAllowlist {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	for _, k := range passEnv {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		v, ok := os.LookupEnv(k)
+		if !ok {
+			return nil, fmt.Errorf("--pass-env %s: not set in parent environment", k)
+		}
+		env = append(env, k+"="+v)
+	}
+	return env, nil
 }
 
 // Command returns the full argv that runs `argv` sandboxed with writes
@@ -72,6 +116,7 @@ func Command(profilesDir, workDir string, argv []string) ([]string, error) {
 			"--ro-bind", "/", "/",
 			"--dev", "/dev",
 			"--tmpfs", "/tmp",
+			"--dir", linuxScratchHome,
 			"--bind", cwd, cwd,
 			"--unshare-net",
 			"--die-with-parent",

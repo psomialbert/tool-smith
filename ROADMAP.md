@@ -23,12 +23,12 @@ Versions are themes, not promises; order within a release is by risk.
 
 ## v0.2 — Operational hardening (do first)
 
-- **Sanitize the environment for sandboxed runs.** Today `smith run` passes
-  the full parent env (tokens included) to Tier 0/2 tools. Network is
-  blocked, but env → file-in-CWD → later exfil is a real channel. Default:
-  minimal allowlist (PATH, HOME=scratch, TMPDIR, LANG, TERM); per-tool env
-  passthrough must be declared in the manifest and is part of promotion
-  review. *This is the one item I'd treat as a bug, not a feature.*
+- ~~**Sanitize the environment for sandboxed runs.**~~ **Shipped** (was a
+  bug): Tier 0/2 runs and self-tests get an allowlist env
+  (PATH/TMPDIR/LANG/LC_*/TERM/TZ) + scratch HOME; explicit per-invocation
+  forwarding via `smith run --pass-env`. Still open for v0.4: declaring
+  required env in the tool *manifest* so passthrough is part of promotion
+  review rather than per-invocation.
 - **`smith sync`.** Demotion is currently local-only: revoking on machine A
   does nothing on machine B until B pulls and reconciles. `sync` = git pull
   index + reconcile local store: entries demoted upstream come off PATH

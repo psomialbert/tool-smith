@@ -88,14 +88,44 @@ func TestSelfTestRunsSandboxed(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A self-test that requires writing outside CWD/TMP must fail, proving
-	// the self-test itself executes under the sandbox.
-	script := "#!/bin/bash\ntouch \"$HOME/smith-escape-proof\" || exit 1\nexit 0\n"
+	// the self-test itself executes under the sandbox. $HOME inside the
+	// sandbox is a scratch dir, so target the REAL user home by absolute
+	// path.
+	realHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(realHome, "smith-escape-proof")
+	script := "#!/bin/bash\ntouch \"" + marker + "\" || exit 1\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(dir, "selftest.sh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := cmdRegister(p, []string{"escapee"})
-	if err == nil {
-		os.Remove(filepath.Join(os.Getenv("HOME"), "smith-escape-proof"))
-		t.Fatal("self-test wrote to $HOME — it is not sandboxed")
+	if err := cmdRegister(p, []string{"escapee"}); err == nil {
+		os.Remove(marker)
+		t.Fatal("self-test wrote to the real home dir — it is not sandboxed")
+	}
+}
+
+func TestSelfTestEnvSanitized(t *testing.T) {
+	requireSandbox(t)
+	p := testPaths(t)
+	t.Setenv("SMITH_TEST_SECRET", "boom")
+	dir := draftDir(p, "leakcheck")
+	if err := scaffold.Create(dir, scaffold.Manifest{
+		Name: "leakcheck", Version: "0.1.0", Description: "asserts env is clean", Runtime: "bash",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Passes ONLY if the secret is absent and HOME is not the real home.
+	realHome, _ := os.UserHomeDir()
+	script := "#!/bin/bash\n" +
+		"[ -z \"${SMITH_TEST_SECRET:-}\" ] || { echo leaked >&2; exit 1; }\n" +
+		"[ \"$HOME\" != \"" + realHome + "\" ] || { echo real-home >&2; exit 1; }\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "selftest.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdRegister(p, []string{"leakcheck"}); err != nil {
+		t.Fatalf("sandbox env is not sanitized: %v", err)
 	}
 }

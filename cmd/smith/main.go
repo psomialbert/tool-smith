@@ -498,6 +498,10 @@ func runSelfTest(p config.Paths, dir, entry string) error {
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = work
+	cmd.Env, err = sandbox.Env(nil) // self-tests run unreviewed code: sanitized env too
+	if err != nil {
+		return err
+	}
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	fmt.Fprintf(os.Stderr, "[smith] running self-test sandboxed in %s\n", work)
@@ -562,8 +566,23 @@ func cmdList(p config.Paths, args []string) error {
 // ---------------------------------------------------------------- run
 
 func cmdRun(p config.Paths, args []string) error {
+	// Leading --pass-env NAME[,NAME...] flags forward specific parent env
+	// vars into the sandbox (ignored for Tier 1, which runs unsandboxed
+	// with the full environment anyway).
+	var passEnv []string
+	for len(args) > 0 {
+		if v, ok := strings.CutPrefix(args[0], "--pass-env="); ok {
+			passEnv = append(passEnv, strings.Split(v, ",")...)
+			args = args[1:]
+		} else if args[0] == "--pass-env" && len(args) > 1 {
+			passEnv = append(passEnv, strings.Split(args[1], ",")...)
+			args = args[2:]
+		} else {
+			break
+		}
+	}
 	if len(args) < 1 {
-		return fmt.Errorf("usage: smith run <name>[@<version>] [args...]")
+		return fmt.Errorf("usage: smith run [--pass-env NAME,...] <name>[@<version>] [args...]")
 	}
 	name, version := splitSpec(args[0])
 	toolArgs := args[1:]
@@ -591,19 +610,23 @@ func cmdRun(p config.Paths, args []string) error {
 		return fmt.Errorf("REFUSING TO RUN %s: sha256 mismatch\n  pinned: %s\n  actual: %s\nrun `smith verify` and investigate", bin, art.Sha256, sum)
 	}
 	argv := append([]string{bin}, toolArgs...)
+	env := os.Environ()
 	if e.Tier != 1 {
 		wrapped, err := sandbox.Command(p.SandboxProfiles, "", argv)
 		if err != nil {
 			return err // never fall back to unsandboxed
 		}
-		fmt.Fprintf(os.Stderr, "[smith] tier %d tool — running sandboxed (no network, writes limited to CWD+TMP)\n", e.Tier)
+		if env, err = sandbox.Env(passEnv); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "[smith] tier %d tool — running sandboxed (no network, writes limited to CWD+TMP, env sanitized)\n", e.Tier)
 		argv = wrapped
 	}
 	exe, err := exec.LookPath(argv[0])
 	if err != nil {
 		return err
 	}
-	return syscall.Exec(exe, argv, os.Environ())
+	return syscall.Exec(exe, argv, env)
 }
 
 func pickArtifact(e index.Entry, name string) (index.Artifact, error) {
