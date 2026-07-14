@@ -800,7 +800,7 @@ func cmdPublish(p config.Paths, args []string) error {
 		return err
 	}
 	if out, _ := gitOutput(p, "remote"); strings.TrimSpace(out) != "" {
-		if err := gitInHome(p, "push"); err != nil {
+		if err := gitInHome(p, "push", "-u", "origin", "HEAD"); err != nil {
 			return fmt.Errorf("committed locally but push failed: %w", err)
 		}
 		fmt.Println("index committed and pushed")
