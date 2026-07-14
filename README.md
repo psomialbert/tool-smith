@@ -5,7 +5,7 @@ thin convention + trust gate over [mise](https://mise.jdx.dev). See
 `toolsmith-spec.md` for the full spec; this README records what's built and
 the decisions taken.
 
-## Status: Phases 0–1 complete (single-machine)
+## Status: Phases 0–2 complete
 
 | Command | State |
 |---|---|
@@ -18,7 +18,10 @@ the decisions taken.
 | `smith verify` | ✅ provenance hash-chain + all sha256 pins + PATH hygiene + trusted-bin symlink containment |
 | `smith new <name>` | ✅ scaffolds an agent-friendly CLI draft (bash / python-stdlib) in `$SMITH_HOME/drafts/` with self-test, SKILL.md stub, draft manifest |
 | `smith register <name>` | ✅ runs the draft's self-test **inside the sandbox**; failure blocks registration; pass → Tier 0 quarantine + printed promotion request |
-| `smith publish` | Phase 2 (signed index) |
+| `smith promote` (full) | ✅ authored tools: blob is packed, sha256-pinned, and pushed to the shared transport **before** the trust transition — promotion refused if no transport or push fails |
+| `smith publish` | ✅ ed25519-signs the manifest set (`index/index.sig`), commits index+provenance in the `$SMITH_HOME` git repo, pushes if a remote exists; refuses if a Tier 1 entry still has a machine-local source |
+| `smith fetch <name>[@ver]` | ✅ machine B: installs from the index alone — blob (or mise re-install) fetched, blob + every artifact checksum verified; Tier 1 requires a **valid index signature**, otherwise lands quarantined at Tier 2 |
+| `smith verify` | ✅ now also validates the index signature and every per-machine provenance chain |
 
 Phase 0 acceptance not yet checked: **two-machine reproduction** (needs the
 Linux box; `mise.toml` + the index are designed for it but it's unverified).
@@ -68,6 +71,29 @@ Phase 2 index repo without ever committing binaries.
   authoring time); discovery-token cost is deferred until skills are actually
   exported to sessions — the stub lives with the tool in the store, pinned as
   a doc, never executed.
+- **Blob transport (§10):** pluggable, two backends. `github-release`
+  (recommended): assets on a rolling `smith-blobs` release in a **private**
+  repo via `gh`. `local-dir`: any synced folder. Configure per machine in
+  `$SMITH_HOME/config.yaml`:
+  `transport: {kind: github-release, repo: you/smith-index}` or
+  `{kind: local-dir, path: /path/to/synced}`.
+- **Index signing:** stdlib ed25519, no cosign/minisign install needed —
+  smith is both signer and verifier of a *private* index; interop wasn't
+  buying anything. `index.sig` = signature over a canonical digest of every
+  entry YAML. The private key lives only in `keys/` (git-ignored, 0600);
+  `smith.pub` travels with the index repo — trust-on-first-clone, so check
+  the fingerprint out-of-band when setting up a new machine.
+- **Platform-keyed entries:** `index/tools/<name>/<version>/<platform>.yaml`
+  (`any` for scripts, else `GOOS-GOARCH`) — external binaries hash
+  differently per arch, so pins are per platform; authored scripts pin once.
+- **Per-machine provenance:** `provenance/<hostname>.jsonl` — independent
+  hash chains merge cleanly through git where one shared appended file would
+  conflict and break.
+- **Cross-machine trust rule:** trust travels via the signed index only. A
+  Tier 1 script fetches straight to trusted on machine B after signature +
+  checksum verification. An external tool fetched onto a *different platform*
+  than the reviewed one has different bytes — it lands at Tier 2 and needs a
+  local (fast, provenance-informed) promotion.
 
 ## Trust-gate properties verified end-to-end (this machine)
 
@@ -106,4 +132,12 @@ smith verify --json
 smith new mytool --runtime bash --desc "what it does"
 $EDITOR ~/.toolsmith/drafts/mytool/{mytool,selftest.sh,SKILL.md}
 smith register mytool      # sandboxed self-test → Tier 0 + promotion request
+
+# cross-machine (machine A)
+$EDITOR ~/.toolsmith/config.yaml   # transport: {kind: github-release, repo: you/smith-index}
+smith promote mytool@0.1.0 # human review; blob pushed to transport first
+smith publish              # sign manifest set, commit + push index repo
+# (machine B)
+git clone <index remote> ~/.toolsmith && $EDITOR ~/.toolsmith/config.yaml
+smith fetch mytool@0.1.0   # signature + checksums verified → Tier 1, on PATH
 ```

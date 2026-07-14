@@ -8,6 +8,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+
+	"smith/internal/transport"
 )
 
 type Paths struct {
@@ -34,15 +39,39 @@ func Resolve() (Paths, error) {
 		return Paths{}, err
 	}
 	home = abs
+	// Provenance is per-machine: SMITH_HOME syncs via git across machines,
+	// and independent per-host chains merge cleanly where one shared
+	// append-only file would conflict and break its hash chain.
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown-host"
+	}
 	return Paths{
 		Home:            home,
 		IndexTools:      filepath.Join(home, "index", "tools"),
 		StoreTrusted:    filepath.Join(home, "store", "trusted"),
 		StoreQuarantine: filepath.Join(home, "store", "quarantine"),
 		TrustedBin:      filepath.Join(home, "store", "trusted", "bin"),
-		ProvenanceLog:   filepath.Join(home, "provenance", "log.jsonl"),
+		ProvenanceLog:   filepath.Join(home, "provenance", host+".jsonl"),
 		SandboxProfiles: filepath.Join(home, "sandbox", "profiles"),
 	}, nil
+}
+
+// FileConfig is $SMITH_HOME/config.yaml.
+type FileConfig struct {
+	Transport transport.Config `yaml:"transport"`
+}
+
+func (p Paths) LoadFileConfig() (FileConfig, error) {
+	var c FileConfig
+	raw, err := os.ReadFile(filepath.Join(p.Home, "config.yaml"))
+	if os.IsNotExist(err) {
+		return c, nil
+	}
+	if err != nil {
+		return c, err
+	}
+	return c, yaml.Unmarshal(raw, &c)
 }
 
 func (p Paths) EnsureLayout() error {
@@ -59,14 +88,35 @@ func (p Paths) EnsureLayout() error {
 			return err
 		}
 	}
-	// The store holds binaries; it must never be committed to the index repo.
+	// SMITH_HOME doubles as the index git repo. Binaries (store), the
+	// private signing key (keys), and machine-local drafts must never be
+	// committed; append any missing ignore lines without clobbering.
 	gi := filepath.Join(p.Home, ".gitignore")
-	if _, err := os.Stat(gi); os.IsNotExist(err) {
-		if err := os.WriteFile(gi, []byte("store/\n"), 0o644); err != nil {
+	existing, _ := os.ReadFile(gi)
+	content := string(existing)
+	for _, line := range []string{"store/", "keys/", "drafts/"} {
+		if !containsLine(content, line) {
+			if content != "" && !strings.HasSuffix(content, "\n") {
+				content += "\n"
+			}
+			content += line + "\n"
+		}
+	}
+	if string(existing) != content {
+		if err := os.WriteFile(gi, []byte(content), 0o644); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func containsLine(text, line string) bool {
+	for _, l := range strings.Split(text, "\n") {
+		if strings.TrimSpace(l) == line {
+			return true
+		}
+	}
+	return false
 }
 
 // Actor identifies who is acting, for provenance. Agent sessions are marked

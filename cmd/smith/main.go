@@ -24,7 +24,9 @@ import (
 	"smith/internal/provenance"
 	"smith/internal/sandbox"
 	"smith/internal/scaffold"
+	"smith/internal/sign"
 	"smith/internal/store"
+	"smith/internal/transport"
 )
 
 func main() {
@@ -57,7 +59,9 @@ func main() {
 	case "register":
 		err = cmdRegister(paths, args)
 	case "publish":
-		err = fmt.Errorf("`smith publish` (signed index) lands in Phase 2")
+		err = cmdPublish(paths, args)
+	case "fetch":
+		err = cmdFetch(paths, args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -90,7 +94,8 @@ Usage:
   smith new <name> [--runtime bash|python] [--desc <text>]
                                     scaffold an agent-friendly CLI draft (cli-creator)
   smith register <name>             sandbox-run the draft's self-test; pass -> Tier 0 + promotion request
-  smith publish <name>@<ver>        (Phase 2) sign + push index entry
+  smith publish                     sign the manifest set + commit/push the index repo
+  smith fetch <name>[@<ver>]        install a tool on this machine from the index (checksum + signature verified)
 
 Tiers: 0 = authored (quarantined)  1 = trusted (PATH)  2 = external (quarantined)
 SMITH_HOME: ` + defaultHomeHint() + `
@@ -129,6 +134,12 @@ func cmdInit(p config.Paths, args []string) error {
 	}
 	if err := misex.Trust(cwd); err != nil {
 		return fmt.Errorf("mise trust failed: %w", err)
+	}
+	// SMITH_HOME is the index repo; make it one so publish can commit/push.
+	if _, err := os.Stat(filepath.Join(p.Home, ".git")); os.IsNotExist(err) {
+		if err := gitInHome(p, "init", "-q"); err != nil {
+			fmt.Fprintln(os.Stderr, "[smith] warning: could not git-init SMITH_HOME; `smith publish` needs it")
+		}
 	}
 	// Verify the two PATH invariants (§5.1) against what mise will activate.
 	envPath, err := misex.EnvPath(cwd)
@@ -261,7 +272,7 @@ func cmdAdd(p config.Paths, args []string) error {
 		artifacts = append(artifacts, index.Artifact{Path: filepath.Join("bin", n), Sha256: sum})
 	}
 	e := index.Entry{
-		Name: name, Version: version, Tier: 2,
+		Name: name, Version: version, Platform: index.CurrentPlatform(), Tier: 2,
 		Origin: "external", Source: "mise:" + spec,
 		AddedAt:   nowUTC(),
 		Artifacts: artifacts,
@@ -376,7 +387,7 @@ func cmdRegister(p config.Paths, args []string) error {
 		return err
 	}
 	e := index.Entry{
-		Name: m.Name, Version: m.Version, Tier: 0,
+		Name: m.Name, Version: m.Version, Platform: index.PlatformAny, Tier: 0,
 		Origin: "authored:" + config.Actor(), Source: "local:" + dir,
 		AddedAt: nowUTC(),
 	}
@@ -499,9 +510,13 @@ func cmdList(p config.Paths, args []string) error {
 		return nil
 	}
 	tierName := map[int]string{0: "0 authored", 1: "1 TRUSTED", 2: "2 external"}
-	fmt.Printf("%-20s %-14s %-12s %-10s %s\n", "NAME", "VERSION", "TIER", "ORIGIN", "ADDED")
+	fmt.Printf("%-16s %-12s %-12s %-14s %-10s %s\n", "NAME", "VERSION", "PLATFORM", "TIER", "ORIGIN", "ADDED")
 	for _, e := range entries {
-		fmt.Printf("%-20s %-14s %-12s %-10s %s\n", e.Name, e.Version, tierName[e.Tier], e.Origin, e.AddedAt)
+		origin := e.Origin
+		if i := strings.Index(origin, ":"); i > 0 {
+			origin = origin[:i]
+		}
+		fmt.Printf("%-16s %-12s %-12s %-14s %-10s %s\n", e.Name, e.Version, e.Platform, tierName[e.Tier], origin, e.AddedAt)
 	}
 	return nil
 }
@@ -625,10 +640,52 @@ func cmdPromote(p config.Paths, args []string) error {
 	return nil
 }
 
+// pushBlob enforces the §5.3 source rule at promotion time: an authored
+// tool's bytes must be on the shared transport before it can become Tier 1,
+// or Goal 1 silently fails on the second machine.
+func pushBlob(p config.Paths, e *index.Entry) error {
+	fc, err := p.LoadFileConfig()
+	if err != nil {
+		return err
+	}
+	tr, err := transport.New(fc.Transport)
+	if err != nil {
+		return fmt.Errorf("authored tool cannot be promoted until its blob is pushed to shared storage: %w", err)
+	}
+	qdir := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
+	tmp, err := os.MkdirTemp("", "smith-blob-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	blobPath := filepath.Join(tmp, "blob.tgz")
+	if err := transport.PackBlob(qdir, blobPath); err != nil {
+		return err
+	}
+	sum, err := store.HashFile(blobPath)
+	if err != nil {
+		return err
+	}
+	asset := fmt.Sprintf("%s-%s-%s-%s.tgz", e.Name, e.Version, e.Platform, sum[:12])
+	locator, err := tr.Push(blobPath, asset)
+	if err != nil {
+		return fmt.Errorf("blob push failed — promotion refused: %w", err)
+	}
+	e.Blob = &index.Blob{Locator: locator, Sha256: sum}
+	e.Source = locator
+	fmt.Fprintf(os.Stderr, "[smith] blob pushed to %s (%s)\n", tr.String(), asset)
+	return nil
+}
+
 // promoteEntry performs the promotion mutations after the human gate has
 // passed. Kept separate so the mechanics are testable without weakening the
 // TTY gate above.
 func promoteEntry(p config.Paths, e index.Entry, reviewer string) error {
+	if strings.HasPrefix(e.Source, "local:") {
+		if err := pushBlob(p, &e); err != nil {
+			return err
+		}
+	}
 	qdir := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
 	tdir := store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
 	if err := store.Move(qdir, tdir); err != nil {
@@ -709,6 +766,196 @@ func cmdDemote(p config.Paths, args []string) error {
 	return nil
 }
 
+// ---------------------------------------------------------------- publish
+
+// cmdPublish signs the manifest set and commits (and pushes, if a remote is
+// configured) the index repo. Separate, explicit human step after promote —
+// nothing auto-publishes (§4, §7).
+func cmdPublish(p config.Paths, args []string) error {
+	entries, err := index.ListAll(p.IndexTools)
+	if err != nil {
+		return err
+	}
+	// The signed index is the trust vehicle across machines: refuse to sign
+	// Tier 1 authored entries whose blob never made it to shared storage.
+	for _, e := range entries {
+		if e.Tier == 1 && strings.HasPrefix(e.Source, "local:") {
+			return fmt.Errorf("%s@%s is Tier 1 with a machine-local source — re-promote after configuring a transport", e.Name, e.Version)
+		}
+	}
+	s, err := sign.SignIndex(p.Home, p.IndexTools, nowUTC())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("signed manifest set: digest %s… key %s\n", s.Digest[:12], s.KeyFprint)
+
+	if err := gitInHome(p, "add", "index", "provenance"); err != nil {
+		return err
+	}
+	if out, _ := gitOutput(p, "status", "--porcelain"); strings.TrimSpace(out) == "" {
+		fmt.Println("index unchanged since last publish; nothing to commit")
+		return nil
+	}
+	if err := gitInHome(p, "commit", "-m", "smith publish "+nowUTC()); err != nil {
+		return err
+	}
+	if out, _ := gitOutput(p, "remote"); strings.TrimSpace(out) != "" {
+		if err := gitInHome(p, "push"); err != nil {
+			return fmt.Errorf("committed locally but push failed: %w", err)
+		}
+		fmt.Println("index committed and pushed")
+	} else {
+		fmt.Println("index committed (no git remote configured — add one to sync machines)")
+	}
+	return nil
+}
+
+func gitInHome(p config.Paths, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = p.Home
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	return cmd.Run()
+}
+
+func gitOutput(p config.Paths, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = p.Home
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// ---------------------------------------------------------------- fetch
+
+// cmdFetch materializes a tool on this machine from the index alone.
+// Tier 1 + valid index signature -> installed trusted, on PATH.
+// Anything else -> quarantine, sandbox-only, promote locally to trust.
+func cmdFetch(p config.Paths, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: smith fetch <name>[@<version>]")
+	}
+	if err := p.EnsureLayout(); err != nil {
+		return err
+	}
+	name, version := splitSpec(args[0])
+	e, err := index.Resolve(p.IndexTools, name, version)
+	if err != nil {
+		return err
+	}
+	base := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
+	if e.Tier == 1 {
+		base = store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
+	}
+	if _, err := os.Stat(base); err == nil {
+		return fmt.Errorf("%s@%s already installed at %s", e.Name, e.Version, base)
+	}
+
+	trustable := e.Tier == 1
+	if trustable {
+		present, verr := sign.VerifyIndex(p.Home, p.IndexTools)
+		if !present {
+			trustable = false
+			fmt.Fprintln(os.Stderr, "[smith] index is unsigned — Tier 1 entry will be installed to QUARANTINE; promote locally after review")
+		} else if verr != nil {
+			return fmt.Errorf("index signature check failed — refusing to fetch: %w", verr)
+		}
+	}
+
+	switch {
+	case e.Blob != nil:
+		tmp, err := os.MkdirTemp("", "smith-fetch-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(tmp)
+		blobPath := filepath.Join(tmp, "blob.tgz")
+		fc, err := p.LoadFileConfig()
+		if err != nil {
+			return err
+		}
+		tr, err := transport.New(fc.Transport)
+		if err != nil {
+			return err
+		}
+		if err := tr.Fetch(e.Blob.Locator, blobPath); err != nil {
+			return err
+		}
+		sum, err := store.HashFile(blobPath)
+		if err != nil {
+			return err
+		}
+		if sum != e.Blob.Sha256 {
+			return fmt.Errorf("blob sha256 MISMATCH for %s@%s: pinned=%s got=%s — refusing", e.Name, e.Version, e.Blob.Sha256, sum)
+		}
+		dst := base
+		if !trustable {
+			dst = store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
+		}
+		if err := transport.UnpackBlob(blobPath, dst); err != nil {
+			return err
+		}
+	case strings.HasPrefix(e.Source, "mise:"):
+		spec := strings.TrimPrefix(e.Source, "mise:")
+		if err := misex.Install(spec); err != nil {
+			return err
+		}
+		binDirs, err := misex.BinPaths(spec)
+		if err != nil || len(binDirs) == 0 {
+			return fmt.Errorf("mise bin-paths failed for %s: %v", spec, err)
+		}
+		dst := base
+		if !trustable {
+			dst = store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
+		}
+		for _, d := range binDirs {
+			if _, err := store.CopyExecutables(d, filepath.Join(dst, "bin")); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("entry %s@%s has no fetchable source (%s)", e.Name, e.Version, e.Source)
+	}
+
+	// Verify every pinned artifact of what we just materialized.
+	dst := base
+	if !trustable {
+		dst = store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
+	}
+	for _, a := range append(append([]index.Artifact{}, e.Artifacts...), e.Docs...) {
+		sum, err := store.HashFile(filepath.Join(dst, a.Path))
+		if err != nil {
+			return fmt.Errorf("pinned file missing after fetch: %s: %w", a.Path, err)
+		}
+		if sum != a.Sha256 {
+			os.RemoveAll(dst)
+			return fmt.Errorf("sha256 MISMATCH on %s after fetch — removed; refusing", a.Path)
+		}
+	}
+	tier := e.Tier
+	if e.Tier == 1 && trustable {
+		var names []string
+		for _, a := range e.Artifacts {
+			names = append(names, a.Path)
+		}
+		if err := store.LinkBin(p.TrustedBin, p.StoreTrusted, e.Name, e.Version, names); err != nil {
+			return err
+		}
+	} else if e.Tier == 1 {
+		tier = 2 // unsigned index: treat as external quarantine locally
+		e.Tier = tier
+		if err := index.Save(p.IndexTools, e); err != nil {
+			return err
+		}
+	}
+	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
+		Event: "fetch", Tool: e.Name, Version: e.Version,
+		TierTo: provenance.Tier(tier), Actor: config.Actor(), Origin: e.Source,
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("fetched %s@%s -> tier %d (%s)\n", e.Name, e.Version, tier, dst)
+	return nil
+}
+
 // ---------------------------------------------------------------- verify
 
 type verifyResult struct {
@@ -728,11 +975,27 @@ func cmdVerify(p config.Paths, args []string) error {
 	var results []verifyResult
 	add := func(r verifyResult) { results = append(results, r) }
 
-	n, err := provenance.VerifyChain(p.ProvenanceLog)
-	if err != nil {
-		add(verifyResult{Check: "provenance-chain", OK: false, Detail: err.Error()})
+	// Every per-machine provenance chain must verify.
+	logs, _ := filepath.Glob(filepath.Join(filepath.Dir(p.ProvenanceLog), "*.jsonl"))
+	for _, lg := range logs {
+		n, err := provenance.VerifyChain(lg)
+		label := "provenance-chain:" + strings.TrimSuffix(filepath.Base(lg), ".jsonl")
+		if err != nil {
+			add(verifyResult{Check: label, OK: false, Detail: err.Error()})
+		} else {
+			add(verifyResult{Check: label, OK: true, Detail: fmt.Sprintf("%d entries", n)})
+		}
+	}
+
+	// Index signature over the manifest set (present only after first publish).
+	if present, err := sign.VerifyIndex(p.Home, p.IndexTools); present {
+		if err != nil {
+			add(verifyResult{Check: "index-signature", OK: false, Detail: err.Error()})
+		} else {
+			add(verifyResult{Check: "index-signature", OK: true})
+		}
 	} else {
-		add(verifyResult{Check: "provenance-chain", OK: true, Detail: fmt.Sprintf("%d entries", n)})
+		add(verifyResult{Check: "index-signature", OK: true, Detail: "not yet published (unsigned)"})
 	}
 
 	entries, err := index.List(p.IndexTools)

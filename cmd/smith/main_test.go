@@ -41,7 +41,7 @@ func fakeTool(t *testing.T, p config.Paths, name, version string) index.Entry {
 		t.Fatal(err)
 	}
 	e := index.Entry{
-		Name: name, Version: version, Tier: 2, Origin: "external",
+		Name: name, Version: version, Platform: index.PlatformAny, Tier: 2, Origin: "external",
 		Source: "test", AddedAt: nowUTC(),
 		Artifacts: []index.Artifact{{Path: filepath.Join("bin", name), Sha256: sum}},
 	}
