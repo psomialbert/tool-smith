@@ -28,12 +28,45 @@ func Latest(name string) (string, error) {
 
 // Install downloads and installs tool@version into mise's own store. mise
 // performs the backend's checksum verification during this step. The tool is
-// NOT activated on any PATH by this call.
+// NOT activated on any PATH by this call. The downloaded archive is kept so
+// smith can attestation-verify the exact bytes that were fetched.
 func Install(spec string) error {
 	cmd := exec.Command("mise", "install", spec)
+	cmd.Env = append(os.Environ(), "MISE_ALWAYS_KEEP_DOWNLOAD=1")
 	cmd.Stdout = os.Stderr // progress is diagnostics, keep stdout machine-clean
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// Registry returns the primary backend spec for a short tool name, e.g.
+// "aqua:cli/cli" for gh. Empty when unknown.
+func Registry(name string) string {
+	out, err := run("registry", name)
+	if err != nil {
+		return ""
+	}
+	return strings.Fields(out)[0]
+}
+
+// DownloadsDir locates the kept download archive dir for an installed spec:
+// <data>/installs/<n>/<v> (from `mise where`) -> <data>/downloads/<n>/<v>.
+func DownloadsDir(spec string) (string, error) {
+	where, err := Where(spec)
+	if err != nil {
+		return "", err
+	}
+	installs := where
+	for i := 0; i < 2; i++ {
+		installs = strings.TrimSuffix(installs, "/")
+		if idx := strings.LastIndex(installs, "/"); idx >= 0 {
+			installs = installs[:idx]
+		}
+	}
+	if !strings.HasSuffix(installs, "/installs") {
+		return "", fmt.Errorf("unexpected mise install layout: %s", where)
+	}
+	rel := strings.TrimPrefix(where, installs+"/")
+	return strings.TrimSuffix(installs, "installs") + "downloads/" + rel, nil
 }
 
 // Where returns the install directory for an installed tool@version.

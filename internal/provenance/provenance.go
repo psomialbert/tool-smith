@@ -26,8 +26,9 @@ type Entry struct {
 	TierFrom *int   `json:"tier_from"`
 	TierTo   *int   `json:"tier_to"`
 	Actor    string `json:"actor"`
-	Origin   string `json:"origin,omitempty"`
-	SelfTest string `json:"self_test,omitempty"`
+	Origin       string `json:"origin,omitempty"`
+	SelfTest     string `json:"self_test,omitempty"`
+	Verification string `json:"verification,omitempty"`
 	Reviewer string `json:"reviewer,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 }

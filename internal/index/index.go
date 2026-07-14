@@ -46,6 +46,9 @@ type Entry struct {
 	Artifacts []Artifact `yaml:"artifacts" json:"artifacts"` // executables (symlinked on promote)
 	Docs      []Artifact `yaml:"docs,omitempty" json:"docs,omitempty"` // pinned non-executables (SKILL.md, selftest, manifest)
 	Blob      *Blob      `yaml:"blob,omitempty" json:"blob,omitempty"` // authored tools: shared-transport archive
+	// Verification is the strongest check the source passed at add time:
+	// gh-attestation | aqua-registry | tofu (see internal/attest).
+	Verification string `yaml:"verification,omitempty" json:"verification,omitempty"`
 }
 
 func entryPath(indexTools, name, version, platform string) string {

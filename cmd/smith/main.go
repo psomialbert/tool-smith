@@ -18,6 +18,7 @@ import (
 
 	"golang.org/x/term"
 
+	"smith/internal/attest"
 	"smith/internal/config"
 	"smith/internal/index"
 	"smith/internal/misex"
@@ -214,13 +215,37 @@ func pathTouchesQuarantine(pathVar, quarantine string) bool {
 // ---------------------------------------------------------------- add
 
 func cmdAdd(p config.Paths, args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("usage: smith add <name>[@<version>]")
+	fs := flag.NewFlagSet("add", flag.ContinueOnError)
+	allowUnverified := fs.Bool("allow-unverified", false,
+		"accept a source with no attestation and no curated-registry checksums (TOFU pin only)")
+	var spec0 string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		spec0, args = args[0], args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if spec0 == "" && fs.NArg() == 1 {
+		spec0 = fs.Arg(0)
+	}
+	if spec0 == "" {
+		return fmt.Errorf("usage: smith add <name>[@<version>] [--allow-unverified]")
 	}
 	if err := p.EnsureLayout(); err != nil {
 		return err
 	}
-	name, version := splitSpec(args[0])
+	name, version := splitSpec(spec0)
+
+	// Verification policy (§8 Phase 3): attestation when the source offers
+	// it, curated-registry checksums as baseline, TOFU only with explicit
+	// operator consent — decided BEFORE any resolution or download.
+	backend := misex.Registry(name)
+	level := attest.BackendLevel(backend)
+	if level == attest.LevelTOFU && !*allowUnverified {
+		return fmt.Errorf("%s resolves via %q: no attestation and no curated checksum registry.\n"+
+			"Refusing (§7). To pin trust-on-first-use anyway: smith add %s --allow-unverified", name, backend, spec0)
+	}
+
 	if version == "" {
 		v, err := misex.Latest(name)
 		if err != nil || v == "" {
@@ -236,6 +261,17 @@ func cmdAdd(p config.Paths, args []string) error {
 	fmt.Fprintf(os.Stderr, "resolving %s via mise (backend checksum verification applies)...\n", spec)
 	if err := misex.Install(spec); err != nil {
 		return fmt.Errorf("mise install failed — tool is NOT registered: %w", err)
+	}
+	verification := level
+	if repo := attest.GitHubRepo(backend); repo != "" {
+		if dlDir, err := misex.DownloadsDir(spec); err == nil {
+			if res, ok := attest.VerifyArchives(dlDir, repo); ok {
+				verification = res.Level
+				fmt.Fprintf(os.Stderr, "[smith] attestation verified: %s (%s)\n", res.Detail, res.PredicateType)
+			} else {
+				fmt.Fprintf(os.Stderr, "[smith] no attestations for %s archives; verification level: %s\n", repo, level)
+			}
+		}
 	}
 	// mise's backend knows where the executables are inside the archive
 	// (bin/, nested release dir, ...); ask it rather than guessing.
@@ -274,8 +310,9 @@ func cmdAdd(p config.Paths, args []string) error {
 	e := index.Entry{
 		Name: name, Version: version, Platform: index.CurrentPlatform(), Tier: 2,
 		Origin: "external", Source: "mise:" + spec,
-		AddedAt:   nowUTC(),
-		Artifacts: artifacts,
+		AddedAt:      nowUTC(),
+		Artifacts:    artifacts,
+		Verification: verification,
 	}
 	if err := index.Save(p.IndexTools, e); err != nil {
 		return err
@@ -283,6 +320,7 @@ func cmdAdd(p config.Paths, args []string) error {
 	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
 		Event: "add", Tool: name, Version: version,
 		TierTo: provenance.Tier(2), Actor: config.Actor(), Origin: e.Source,
+		Verification: verification,
 	}); err != nil {
 		return err
 	}
@@ -613,6 +651,9 @@ func cmdPromote(p config.Paths, args []string) error {
 
 	fmt.Printf("Promotion review for %s@%s (tier %d -> 1)\n", e.Name, e.Version, e.Tier)
 	fmt.Printf("  origin: %s\n  source: %s\n  added:  %s\n", e.Origin, e.Source, e.AddedAt)
+	if e.Verification != "" {
+		fmt.Printf("  verification at add time: %s\n", e.Verification)
+	}
 	qdir := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
 	fmt.Printf("  store:  %s\n", qdir)
 	for _, a := range e.Artifacts {

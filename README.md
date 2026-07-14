@@ -5,7 +5,7 @@ thin convention + trust gate over [mise](https://mise.jdx.dev). See
 `toolsmith-spec.md` for the full spec; this README records what's built and
 the decisions taken.
 
-## Status: Phases 0–2 complete
+## Status: Phases 0–3 complete (all spec phases)
 
 | Command | State |
 |---|---|
@@ -22,6 +22,7 @@ the decisions taken.
 | `smith publish` | ✅ ed25519-signs the manifest set (`index/index.sig`), commits index+provenance in the `$SMITH_HOME` git repo, pushes if a remote exists; refuses if a Tier 1 entry still has a machine-local source |
 | `smith fetch <name>[@ver]` | ✅ machine B: installs from the index alone — blob (or mise re-install) fetched, blob + every artifact checksum verified; Tier 1 requires a **valid index signature**, otherwise lands quarantined at Tier 2 |
 | `smith verify` | ✅ now also validates the index signature and every per-machine provenance chain |
+| `smith add` hardening | ✅ Phase 3: verification level decided before any download — `gh-attestation` (SLSA provenance verified over the exact downloaded archive) > `aqua-registry` (curated checksums via mise) > `tofu` (refused unless `--allow-unverified`); level recorded in index + provenance and shown at promotion review |
 
 Two-machine acceptance is verified against a real Linux environment via
 `scripts/linux-e2e.sh` (privileged ubuntu container): clones the live GitHub
@@ -93,6 +94,14 @@ Phase 2 index repo without ever committing binaries.
 - **Per-machine provenance:** `provenance/<hostname>.jsonl` — independent
   hash chains merge cleanly through git where one shared appended file would
   conflict and break.
+- **Attestation (§10 / Phase 3):** GitHub native attestations via
+  `gh attestation verify` against the kept mise download archive
+  (`MISE_ALWAYS_KEEP_DOWNLOAD=1`) — verifying the extracted binary would miss
+  the point, since attestations cover release archives. A tampered archive
+  shows as "no attestations found" (digest lookup), which is why the checksum
+  layer stays mandatory and attestation is a recorded upgrade, not the only
+  gate. Deeper cosign/SLSA checks defined in aqua registry entries are mise's
+  job: install `cosign`/`slsa-verifier` and mise applies them during install.
 - **Cross-machine trust rule:** trust travels via the signed index only. A
   Tier 1 script fetches straight to trusted on machine B after signature +
   checksum verification. An external tool fetched onto a *different platform*
