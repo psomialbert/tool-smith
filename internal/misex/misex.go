@@ -1,0 +1,86 @@
+// Package misex shells out to mise for everything Toolsmith deliberately
+// does not reimplement: backend resolution, download, checksum-verified
+// install, cross-arch handling (§2, §4).
+package misex
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+func run(args ...string) (string, error) {
+	cmd := exec.Command("mise", args...)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("mise %s: %w", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// Latest resolves the newest available version for a tool name via mise's
+// registry (aqua-backed for most tools).
+func Latest(name string) (string, error) {
+	return run("latest", name)
+}
+
+// Install downloads and installs tool@version into mise's own store. mise
+// performs the backend's checksum verification during this step. The tool is
+// NOT activated on any PATH by this call.
+func Install(spec string) error {
+	cmd := exec.Command("mise", "install", spec)
+	cmd.Stdout = os.Stderr // progress is diagnostics, keep stdout machine-clean
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// Where returns the install directory for an installed tool@version.
+func Where(spec string) (string, error) {
+	return run("where", spec)
+}
+
+// BinPaths returns the directories mise considers to hold the tool's
+// executables — the backend knows the archive layout, we don't.
+func BinPaths(spec string) ([]string, error) {
+	out, err := run("bin-paths", spec)
+	if err != nil {
+		return nil, err
+	}
+	var dirs []string
+	for _, l := range strings.Split(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			dirs = append(dirs, l)
+		}
+	}
+	return dirs, nil
+}
+
+// Trust marks a project config path as trusted so mise will load it.
+func Trust(dir string) error {
+	cmd := exec.Command("mise", "trust")
+	cmd.Dir = dir
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// EnvPath returns the PATH that mise would activate for dir.
+func EnvPath(dir string) (string, error) {
+	cmd := exec.Command("mise", "env", "-s", "bash")
+	cmd.Dir = dir
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("mise env: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "export PATH=") {
+			v := strings.TrimPrefix(line, "export PATH=")
+			return strings.Trim(v, "'\""), nil
+		}
+	}
+	return "", nil
+}

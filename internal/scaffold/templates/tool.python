@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""{{NAME}} — {{DESC}}
+
+Agent-friendly contract: --json machine output, --quiet, non-interactive,
+errors to stderr, exit codes: 0 ok / 1 runtime error / 2 usage error.
+
+Stdlib only. If you need third-party deps, the uv-script story (PEP 723)
+needs a sandbox cache strategy first — see cli-creator SKILL.md.
+"""
+import argparse
+import json
+import sys
+
+VERSION = "{{VERSION}}"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="{{NAME}}",
+        description="{{DESC}}",
+        epilog="Exit codes: 0 ok, 1 runtime error, 2 usage error",
+    )
+    p.add_argument("--json", action="store_true", help="machine-readable JSON on stdout")
+    p.add_argument("--quiet", action="store_true", help="suppress non-essential human output")
+    p.add_argument("--version", action="version", version=VERSION)
+    p.add_argument("args", nargs="*", help="TODO: real arguments")
+    return p
+
+
+def emit(opts, machine: dict, human: str) -> None:
+    """Single choke point: the machine path is always structured JSON."""
+    if opts.json:
+        print(json.dumps(machine))
+    elif not opts.quiet:
+        print(human)
+
+
+def main() -> int:
+    opts = build_parser().parse_args()
+    try:
+        # TODO: implement {{NAME}}. Replace this placeholder.
+        emit(opts, {"ok": True, "args": len(opts.args)}, f"ok ({len(opts.args)} args)")
+        return 0
+    except Exception as e:  # noqa: BLE001 — tool boundary
+        print(f"{{NAME}}: error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

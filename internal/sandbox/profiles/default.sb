@@ -1,0 +1,16 @@
+;; Toolsmith default Seatbelt profile for Tier 0/2 (quarantined) tools.
+;; Policy: no network, no writes outside the invoking CWD and TMPDIR.
+;; NOTE: sandbox-exec is deprecated-but-functional (spec §10); revisit if
+;; Apple removes it. Later rules take precedence over earlier ones.
+(version 1)
+(allow default)
+(deny network*)
+(deny file-write*)
+(allow file-write* (subpath (param "CWD")))
+(allow file-write* (subpath (param "TMP")))
+(allow file-write-data
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/dtracehelper")
+  (literal "/dev/tty")
+  (regex #"^/dev/fd/"))
