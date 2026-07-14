@@ -23,8 +23,12 @@ the decisions taken.
 | `smith fetch <name>[@ver]` | ✅ machine B: installs from the index alone — blob (or mise re-install) fetched, blob + every artifact checksum verified; Tier 1 requires a **valid index signature**, otherwise lands quarantined at Tier 2 |
 | `smith verify` | ✅ now also validates the index signature and every per-machine provenance chain |
 
-Phase 0 acceptance not yet checked: **two-machine reproduction** (needs the
-Linux box; `mise.toml` + the index are designed for it but it's unverified).
+Two-machine acceptance is verified against a real Linux environment via
+`scripts/linux-e2e.sh` (privileged ubuntu container): clones the live GitHub
+index, validates the signature, reproduces the external tool version via
+mise, and proves bwrap blocks write/network escapes. A physical Linux box
+would additionally exercise `bwrap` outside a container, but the code paths
+are identical.
 
 ## Layout
 
