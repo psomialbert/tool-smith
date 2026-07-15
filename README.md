@@ -1,11 +1,80 @@
 # smith (Toolsmith)
 
-A durable, portable, *safe* home for agent-authored and agent-consumed CLIs: a
-thin convention + trust gate over [mise](https://mise.jdx.dev). See
-`toolsmith-spec.md` for the full spec; this README records what's built and
-the decisions taken.
+A durable, portable, **safe** home for the CLIs an agent writes and reuses — a
+thin convention + trust gate over [mise](https://mise.jdx.dev).
 
-## Status: Phases 0–3 complete (all spec phases)
+An agent that authors its own tools has nowhere trustworthy to keep them:
+a script lives untracked on one machine (lost next session) or gets pasted
+back into context every time, and pulling someone else's tool is a
+supply-chain event an agent can be prompt-injected into. smith gives
+agent-authored and agent-consumed CLIs a reproducible per-project
+environment, a path from throwaway script to discoverable capability, and a
+**trust boundary so nothing runs unvetted**.
+
+The novel bit is the closed loop: **author → sandbox → self-test →
+human-gated promotion → durable, versioned, discoverable, portable
+capability**. Everything version/PATH-related delegates to mise; smith adds
+the convention, the sandbox, and the trust gate.
+
+## Trust tiers
+
+Every tool smith can run has a tier. This is the whole point.
+
+| Tier | Meaning | Where it lives | How it runs |
+|---|---|---|---|
+| **0 — authored** | agent-written, pending review | `store/quarantine/` | sandboxed, only via `smith run` |
+| **2 — external** | pulled from outside, pending review | `store/quarantine/` | sandboxed, only via `smith run` |
+| **1 — trusted** | passed human-gated promotion | `store/trusted/` | on PATH, unsandboxed |
+
+Tier 0/2 tools are **only** reachable through `smith run`, which sandboxes
+them (no network, writes confined to CWD+TMP, sanitized env) and re-checks
+their sha256 pin before every execution. Only Tier 1 lands on PATH, and a
+tool becomes Tier 1 **only** after a human reads its source and promotes it
+in an interactive terminal — a passing self-test is necessary but never
+sufficient. Trust is revocable (`smith demote`) and every transition is
+recorded in an append-only, hash-chained provenance log.
+
+## Requirements
+
+- [mise](https://mise.jdx.dev) — version/PATH management (smith is a wrapper over it)
+- A functional OS sandbox to run Tier 0/2 tools: macOS Seatbelt (built in) or
+  Linux `bwrap` with unprivileged user+net namespaces (see *Sandbox host
+  requirements* below). smith **fails closed** without one.
+- `git` and `gh` for cross-machine publishing (optional until you go multi-machine)
+
+## Quickstart
+
+```sh
+mise exec -- go build -o smith ./cmd/smith    # build (Go pinned via mise.toml)
+
+smith init                     # set up ~/.toolsmith + put the trusted store on PATH here
+smith add jq@1.7.1             # external tool → Tier 2 (quarantined)
+echo '{"a":1}' | smith run jq '.a'   # runs sandboxed
+smith review jq@1.7.1          # read it, then:
+smith promote jq@1.7.1         # interactive, human-gated → Tier 1, on PATH
+
+# author your own (see skills/cli-creator/SKILL.md)
+smith new greet --runtime bash --desc "what it does"   # bash | python | go | python-uv
+$EDITOR ~/.toolsmith/drafts/greet/{greet,selftest.sh,SKILL.md}
+smith register greet           # sandboxed self-test → Tier 0 + promotion request
+smith review greet && smith promote greet@0.1.0
+
+# go multi-machine
+$EDITOR ~/.toolsmith/config.yaml   # transport: {kind: github-release, repo: you/smith-index}
+smith publish                  # sign the index + push
+#   on machine B:
+git clone <index remote> ~/.toolsmith
+smith fetch greet@0.1.0        # signature + checksums verified → Tier 1, on PATH
+```
+
+`SMITH_HOME` (default `~/.toolsmith`) is the runtime home and doubles as the
+signed index git repo; the code repo (this directory) is separate. See
+`toolsmith-spec.md` for the full spec and `ROADMAP.md` for what's next.
+
+## Command reference
+
+All spec phases (0–3) plus the v0.2–v1.0 roadmap are implemented and tested
+(unit + a real two-machine run). Status of each surface:
 
 | Command | State |
 |---|---|
@@ -45,16 +114,21 @@ The **code repo** (this directory) and the **runtime home** are separate.
 `$SMITH_HOME` (default `~/.toolsmith`) holds:
 
 ```
-index/tools/<name>/<version>.yaml   one manifest entry per tool@version (unsigned until Phase 2)
+index/tools/<name>/<version>/<platform>.yaml   one manifest entry per tool@version@platform
+index/tools/<name>/<version>/mise.lock          cross-platform checksums for external tools
+index/smith.pub, index/authorized_keys, index/index.sig   signing trust set + signature
 store/trusted/<name>/<version>/     Tier 1 binaries
 store/trusted/bin/                  symlink farm — the ONLY directory ever on PATH
 store/quarantine/<name>/<version>/  Tier 0 + 2 — never on PATH, only via `smith run`
-provenance/log.jsonl                append-only, hash-chained (each entry commits to prev line's sha256)
-sandbox/profiles/default.sb         Seatbelt profile (written by `smith init`)
+provenance/<hostname>.jsonl         append-only, hash-chained per machine (each entry commits to prev line's sha256)
+keys/smith.key                      private signing key — git-ignored, never leaves this machine
+sandbox/profiles/                   generated Seatbelt profiles
+config.yaml                         transport, platforms, review, skills, editor settings
 ```
 
-`.gitignore` in `$SMITH_HOME` excludes `store/` so the home can become the
-Phase 2 index repo without ever committing binaries.
+`.gitignore` in `$SMITH_HOME` excludes `store/`, `keys/`, and `drafts/`, so
+the home can be the signed index git repo without committing binaries, the
+private key, or work-in-progress.
 
 ## Sandbox host requirements
 
@@ -155,27 +229,9 @@ mise exec -- go build -o smith ./cmd/smith
 mise exec -- go test ./...
 ```
 
-## Usage sketch
+## Not in scope (v1)
 
-```sh
-smith init                 # in a project dir; then `mise activate` your shell or use `mise exec`
-smith add jq@1.7.1         # → Tier 2, quarantined
-smith run jq '.foo' < in   # sandboxed
-smith promote jq@1.7.1     # human, interactive: review → Tier 1, on PATH
-smith demote jq@1.7.1 --reason "CVE-..."
-smith verify --json
-
-# authoring loop (cli-creator, see skills/cli-creator/SKILL.md)
-smith new mytool --runtime bash --desc "what it does"
-$EDITOR ~/.toolsmith/drafts/mytool/{mytool,selftest.sh,SKILL.md}
-smith register mytool      # sandboxed self-test → Tier 0 + promotion request
-smith review mytool        # read the source (inline / $EDITOR / paths) before trusting
-
-# cross-machine (machine A)
-$EDITOR ~/.toolsmith/config.yaml   # transport: {kind: github-release, repo: you/smith-index}
-smith promote mytool@0.1.0 # human review; blob pushed to transport first
-smith publish              # sign manifest set, commit + push index repo
-# (machine B)
-git clone <index remote> ~/.toolsmith && $EDITOR ~/.toolsmith/config.yaml
-smith fetch mytool@0.1.0   # signature + checksums verified → Tier 1, on PATH
-```
+Per spec §4/§9: no public contribution hub, no multi-user governance/RBAC, no
+GUI, no auto-publish. The prompt-injection → malware-distribution risk means a
+public hub is a deliberate future product decision, not a feature toggle.
+Provenance yes; access control no. Single operator.
