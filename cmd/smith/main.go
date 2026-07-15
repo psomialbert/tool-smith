@@ -605,6 +605,16 @@ func cmdRegister(p config.Paths, args []string) error {
 	if _, err := index.Load(p.IndexTools, m.Name, m.Version); err == nil {
 		return fmt.Errorf("%s@%s already registered; bump version in %s/manifest.yaml", m.Name, m.Version, dir)
 	}
+	// Compiled runtimes build the entrypoint from source first. The Go
+	// toolchain runs unsandboxed here (it is trusted), offline (GOPROXY=off);
+	// promotion review reads main.go, so `//go:embed`/cgo are visible.
+	platform := index.PlatformAny
+	if m.Runtime == "go" {
+		if err := buildGoTool(dir, m.Entrypoint); err != nil {
+			return fmt.Errorf("go build failed — not registered: %w", err)
+		}
+		platform = index.CurrentPlatform() // compiled binary is platform-specific
+	}
 	entry := filepath.Join(dir, m.Entrypoint)
 	if err := os.Chmod(entry, 0o755); err != nil {
 		return fmt.Errorf("entrypoint %s: %w", entry, err)
@@ -627,7 +637,7 @@ func cmdRegister(p config.Paths, args []string) error {
 		return err
 	}
 	e := index.Entry{
-		Name: m.Name, Version: m.Version, Platform: index.PlatformAny, Tier: 0,
+		Name: m.Name, Version: m.Version, Platform: platform, Tier: 0,
 		Origin: "authored:" + config.Actor(), Source: "local:" + dir,
 		AddedAt: nowUTC(),
 	}
@@ -636,7 +646,13 @@ func cmdRegister(p config.Paths, args []string) error {
 		return err
 	}
 	e.Artifacts = []index.Artifact{binArt}
-	for _, doc := range []string{"SKILL.md", "manifest.yaml"} {
+	// For compiled tools the binary isn't human-readable; pin the source so
+	// review reads what was built, not just the artifact.
+	docList := []string{"SKILL.md", "manifest.yaml"}
+	if m.Runtime == "go" {
+		docList = append(docList, "main.go")
+	}
+	for _, doc := range docList {
 		src := filepath.Join(dir, doc)
 		if _, err := os.Stat(src); err != nil {
 			continue
@@ -680,6 +696,19 @@ PROMOTION REQUEST — human action required
 until then: runnable only via `+"`smith run %s`"+` (sandboxed)
 `, m.Name, m.Version, filepath.Join(qdir, "bin", m.Entrypoint), m.Name, m.Version, m.Name)
 	return nil
+}
+
+// buildGoTool compiles dir/main.go into dir/<out>, offline (GOPROXY=off) and
+// without cgo. The Go toolchain is trusted, but review still reads main.go.
+func buildGoTool(dir, out string) error {
+	if _, err := exec.LookPath("go"); err != nil {
+		return fmt.Errorf("go toolchain not found on PATH")
+	}
+	cmd := exec.Command("go", "build", "-trimpath", "-o", out, "main.go")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOPROXY=off", "GOFLAGS=-mod=mod")
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	return cmd.Run()
 }
 
 // runSelfTest executes <draft>/selftest.sh <entrypoint> sandboxed, from a

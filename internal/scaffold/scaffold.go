@@ -17,7 +17,7 @@ import (
 //go:embed templates/*
 var templates embed.FS
 
-var Runtimes = []string{"bash", "python"}
+var Runtimes = []string{"bash", "python", "go"}
 
 // Manifest is the draft manifest (unversioned-draft in spec terms: it exists
 // only in the draft dir until registration pins it into the index).
@@ -72,9 +72,22 @@ func Create(dir string, m Manifest) error {
 		tpl  string
 		mode os.FileMode
 	}{
-		m.Entrypoint:  {"tool." + m.Runtime, 0o755},
 		"selftest.sh": {"selftest.sh", 0o755},
 		"SKILL.md":    {"SKILL.md", 0o644},
+	}
+	if m.Runtime == "go" {
+		// Compiled: the source is main.go; `smith register` builds the
+		// entrypoint binary (which is platform-specific).
+		files["main.go"] = struct {
+			tpl  string
+			mode os.FileMode
+		}{"tool.go", 0o644}
+	} else {
+		// Interpreted: the entrypoint file IS the source and is executable.
+		files[m.Entrypoint] = struct {
+			tpl  string
+			mode os.FileMode
+		}{"tool." + m.Runtime, 0o755}
 	}
 	for name, f := range files {
 		content, err := render(f.tpl, m)
