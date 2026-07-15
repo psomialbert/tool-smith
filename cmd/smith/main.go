@@ -1478,6 +1478,9 @@ func cmdPromote(p config.Paths, args []string) error {
 	}
 	fmt.Printf("promoted: %s@%s is now Tier 1 (trusted, on PATH via %s)\n", e.Name, e.Version, p.TrustedBin)
 	maybeExportSkill(p, rd, e)
+	// Promotion is local; the entry reaches other machines only once signed
+	// and pushed. Nudge, since promote and publish are separate steps.
+	fmt.Printf("next: run `smith publish` to sign + push this to the index (so other machines can `smith fetch %s`)\n", e.Name)
 	return nil
 }
 
@@ -2327,12 +2330,15 @@ func cmdVerify(p config.Paths, args []string) error {
 		if e.Tier == 1 {
 			base = store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
 		}
-		// A Locked external stub not yet materialized here has no local
-		// pins — nothing to check until `smith fetch`.
-		checkSet := append(append([]index.Artifact{}, effectiveArtifacts(e, base)...), e.Docs...)
-		if len(checkSet) == 0 && e.Locked {
-			add(verifyResult{Tool: e.Name, Version: e.Version, Check: "not-fetched", OK: true, Detail: "locked stub; fetch to materialize"})
+		// An entry in the index but not materialized on this machine (fresh
+		// clone, or a not-yet-fetched Tier-1 tool / Locked stub) has nothing
+		// on disk to check — report it informationally, not as a pile of
+		// missing-file failures.
+		if _, statErr := os.Stat(base); os.IsNotExist(statErr) {
+			add(verifyResult{Tool: e.Name, Version: e.Version, Check: "not-fetched", OK: true, Detail: "in index; `smith fetch` to materialize"})
+			continue
 		}
+		checkSet := append(append([]index.Artifact{}, effectiveArtifacts(e, base)...), e.Docs...)
 		for _, a := range checkSet {
 			path := filepath.Join(base, a.Path)
 			sum, err := store.HashFile(path)
