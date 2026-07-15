@@ -29,7 +29,7 @@ type Transport interface {
 
 // Config mirrors the transport section of $SMITH_HOME/config.yaml.
 type Config struct {
-	Kind string `yaml:"kind"` // github-release | local-dir
+	Kind string `yaml:"kind"`           // github-release | local-dir
 	Repo string `yaml:"repo,omitempty"` // owner/name (github-release)
 	Path string `yaml:"path,omitempty"` // directory (local-dir)
 }

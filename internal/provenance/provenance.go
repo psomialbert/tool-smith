@@ -18,19 +18,19 @@ import (
 const genesis = "0000000000000000000000000000000000000000000000000000000000000000"
 
 type Entry struct {
-	Prev     string `json:"prev"`
-	Time     string `json:"ts"`
-	Event    string `json:"event"` // add | author | promote | demote | gc
-	Tool     string `json:"tool"`
-	Version  string `json:"version"`
-	TierFrom *int   `json:"tier_from"`
-	TierTo   *int   `json:"tier_to"`
-	Actor    string `json:"actor"`
+	Prev         string `json:"prev"`
+	Time         string `json:"ts"`
+	Event        string `json:"event"` // add | author | promote | demote | gc
+	Tool         string `json:"tool"`
+	Version      string `json:"version"`
+	TierFrom     *int   `json:"tier_from"`
+	TierTo       *int   `json:"tier_to"`
+	Actor        string `json:"actor"`
 	Origin       string `json:"origin,omitempty"`
 	SelfTest     string `json:"self_test,omitempty"`
 	Verification string `json:"verification,omitempty"`
-	Reviewer string `json:"reviewer,omitempty"`
-	Reason   string `json:"reason,omitempty"`
+	Reviewer     string `json:"reviewer,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 func Tier(n int) *int { return &n }

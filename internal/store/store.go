@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func QuarantineDir(storeQuarantine, name, version string) string {
@@ -113,6 +114,61 @@ func LinkBin(trustedBin, storeTrusted, name, version string, artifacts []string)
 		}
 	}
 	return nil
+}
+
+// UnlinkVersion removes every trusted-bin symlink that points into a tool's
+// version dir, regardless of the artifact list. Used by sync-driven
+// revocation, where the index entry may already be gone.
+func UnlinkVersion(trustedBin, storeTrusted, name, version string) error {
+	entries, err := os.ReadDir(trustedBin)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	prefix := filepath.Join(storeTrusted, name, version) + string(filepath.Separator)
+	for _, de := range entries {
+		link := filepath.Join(trustedBin, de.Name())
+		target, err := os.Readlink(link)
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(target, prefix) {
+			if err := os.Remove(link); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// InstalledVersions lists version dirs present under a tool root
+// (store/trusted or store/quarantine), skipping the bin symlink farm.
+func InstalledVersions(storeRoot string) (map[string][]string, error) {
+	out := map[string][]string{}
+	names, err := os.ReadDir(storeRoot)
+	if os.IsNotExist(err) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, nd := range names {
+		if !nd.IsDir() || nd.Name() == "bin" {
+			continue
+		}
+		versions, err := os.ReadDir(filepath.Join(storeRoot, nd.Name()))
+		if err != nil {
+			return nil, err
+		}
+		for _, vd := range versions {
+			if vd.IsDir() {
+				out[nd.Name()] = append(out[nd.Name()], vd.Name())
+			}
+		}
+	}
+	return out, nil
 }
 
 // UnlinkBin removes the symlinks for a tool's artifacts, immediately taking

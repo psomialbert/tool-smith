@@ -23,6 +23,8 @@ the decisions taken.
 | `smith fetch <name>[@ver]` | ✅ machine B: installs from the index alone — blob (or mise re-install) fetched, blob + every artifact checksum verified; Tier 1 requires a **valid index signature**, otherwise lands quarantined at Tier 2 |
 | `smith verify` | ✅ now also validates the index signature and every per-machine provenance chain |
 | `smith add` hardening | ✅ Phase 3: verification level decided before any download — `gh-attestation` (SLSA provenance verified over the exact downloaded archive) > `aqua-registry` (curated checksums via mise) > `tofu` (refused unless `--allow-unverified`); level recorded in index + provenance and shown at promotion review |
+| `smith sync` | ✅ v0.2: `git pull` the index + reconcile — tools demoted/removed upstream come off PATH and into quarantine immediately (provenance-logged); uninstalled Tier 1 entries reported as fetch candidates. Propagates revocation across machines |
+| `smith gc` | ✅ v0.2: dry-run by default; `--older-than 30d --yes` removes only unpromoted Tier 0 versions past the cutoff + unregistered drafts; never touches Tier 1/2 |
 
 Two-machine acceptance is verified against a real Linux environment via
 `scripts/linux-e2e.sh` (privileged ubuntu container): clones the live GitHub

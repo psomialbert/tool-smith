@@ -24,9 +24,9 @@ import (
 )
 
 type Signature struct {
-	Digest    string `json:"digest"`    // sha256 hex of the canonical manifest set
-	Sig       string `json:"sig"`       // hex ed25519 signature over Digest (as bytes of the hex string)
-	KeyFprint string `json:"key_fprint"`// sha256 hex of the public key, first 16 hex chars
+	Digest    string `json:"digest"`     // sha256 hex of the canonical manifest set
+	Sig       string `json:"sig"`        // hex ed25519 signature over Digest (as bytes of the hex string)
+	KeyFprint string `json:"key_fprint"` // sha256 hex of the public key, first 16 hex chars
 	SignedAt  string `json:"signed_at"`
 }
 

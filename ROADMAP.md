@@ -29,20 +29,30 @@ Versions are themes, not promises; order within a release is by risk.
   forwarding via `smith run --pass-env`. Still open for v0.4: declaring
   required env in the tool *manifest* so passthrough is part of promotion
   review rather than per-invocation.
-- **`smith sync`.** Demotion is currently local-only: revoking on machine A
-  does nothing on machine B until B pulls and reconciles. `sync` = git pull
-  index + reconcile local store: entries demoted upstream come off PATH
-  immediately; missing Tier 1 tools optionally fetched. Revocation (§7) is
-  only real when it propagates.
-- **Provenance completeness.** `publish` and `demote-via-sync` events are
-  not logged today. Every trust-relevant action gets a chain entry.
-- **Tier 0 garbage collection.** Spec §7 says quarantined tools sit "until
-  promoted or garbage-collected" — the GC doesn't exist. `smith gc
-  [--older-than 30d]` for unpromoted Tier 0 versions and stale drafts.
-- **Index schema version field** + one migration hook, so the next format
-  change (there will be one) doesn't need hand-migration like platform-keying did.
+- ~~**`smith sync`.**~~ **Shipped**: `git pull --no-rebase` the index +
+  reconcile the local store — tools demoted/removed upstream come off PATH
+  and move to quarantine immediately (provenance-logged), and uninstalled
+  Tier 1 entries are reported as fetch candidates (never auto-fetched).
+  Append-only provenance logs use a `merge=union` `.gitattributes` so
+  per-host `<hostname>.jsonl` files never conflict on pull.
+- ~~**Provenance completeness.**~~ **Shipped for `publish` + sync-demote**;
+  every trust transition now writes a chain entry. Still open: a `demote`
+  triggered purely by a local index edit outside the commands.
+- ~~**Tier 0 garbage collection.**~~ **Shipped**: `smith gc
+  [--older-than 30d] [--yes]` — dry-run by default, removes only unpromoted
+  Tier 0 versions past the age cutoff plus drafts with no registered
+  version; never touches Tier 1/2; provenance-logged.
+- ~~**Index schema version field** + migration hook.~~ **Shipped**:
+  `Entry.Schema` (current = 1), `migrate()` runs on load and backfills
+  pre-versioning entries (Schema 0 → platform `any`); `Save` always stamps
+  the current version.
 - **CI**: GitHub Actions running `go test ./...` + `scripts/linux-e2e.sh`
-  (minus the private-index step) on push.
+  (minus the private-index step) on push. *(still open)*
+- **Dogfood milestone** (done): `calc`, a safe AST-based expression
+  evaluator, authored end-to-end through `smith new`/`register` and living
+  at Tier 0 in the real index awaiting human promotion — the authoring loop
+  proven on a non-trivial tool, including self-test assertions that reject
+  code execution.
 
 ## v0.3 — Lean on mise.lock
 

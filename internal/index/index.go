@@ -35,15 +35,21 @@ type Blob struct {
 	Sha256  string `yaml:"sha256" json:"sha256"`
 }
 
+// SchemaVersion is the current index-entry format version. Bump it when the
+// on-disk shape changes and add a migration in migrate(); Load tolerates
+// older entries (0 == pre-versioning) so a stale checkout still verifies.
+const SchemaVersion = 1
+
 type Entry struct {
+	Schema    int        `yaml:"schema" json:"schema"`
 	Name      string     `yaml:"name" json:"name"`
 	Version   string     `yaml:"version" json:"version"`
 	Platform  string     `yaml:"platform" json:"platform"` // "any" for scripts, else GOOS-GOARCH
-	Tier      int        `yaml:"tier" json:"tier"` // 0 authored | 1 trusted | 2 external quarantine
+	Tier      int        `yaml:"tier" json:"tier"`         // 0 authored | 1 trusted | 2 external quarantine
 	Origin    string     `yaml:"origin" json:"origin"`
 	Source    string     `yaml:"source" json:"source"` // fetchable spec; machine-local only valid below Tier 1
 	AddedAt   string     `yaml:"added_at" json:"added_at"`
-	Artifacts []Artifact `yaml:"artifacts" json:"artifacts"` // executables (symlinked on promote)
+	Artifacts []Artifact `yaml:"artifacts" json:"artifacts"`           // executables (symlinked on promote)
 	Docs      []Artifact `yaml:"docs,omitempty" json:"docs,omitempty"` // pinned non-executables (SKILL.md, selftest, manifest)
 	Blob      *Blob      `yaml:"blob,omitempty" json:"blob,omitempty"` // authored tools: shared-transport archive
 	// Verification is the strongest check the source passed at add time:
@@ -59,6 +65,7 @@ func Save(indexTools string, e Entry) error {
 	if e.Platform == "" {
 		return fmt.Errorf("index entry %s@%s has no platform", e.Name, e.Version)
 	}
+	e.Schema = SchemaVersion
 	if err := os.MkdirAll(filepath.Join(indexTools, e.Name, e.Version), 0o755); err != nil {
 		return err
 	}
@@ -83,7 +90,7 @@ func Load(indexTools, name, version string) (Entry, error) {
 		if err := yaml.Unmarshal(raw, &e); err != nil {
 			return Entry{}, fmt.Errorf("parsing index entry %s@%s (%s): %w", name, version, plat, err)
 		}
-		return e, nil
+		return migrate(e), nil
 	}
 	return Entry{}, fmt.Errorf("no %s or %s entry for %s@%s: %w",
 		CurrentPlatform(), PlatformAny, name, version, lastErr)
@@ -140,7 +147,7 @@ func list(indexTools string, all bool) ([]Entry, error) {
 				if err := yaml.Unmarshal(raw, &e); err != nil {
 					return nil, fmt.Errorf("parsing %s: %w", pf.Name(), err)
 				}
-				out = append(out, e)
+				out = append(out, migrate(e))
 			}
 		}
 	}
@@ -176,6 +183,20 @@ func Resolve(indexTools, name, version string) (Entry, error) {
 		return Entry{}, fmt.Errorf("tool %q not in index", name)
 	}
 	return candidates[len(candidates)-1], nil
+}
+
+// migrate upgrades an entry read from disk to the current schema in memory.
+// Entries written before schema versioning carry Schema==0; the platform
+// backfill mirrors what pre-versioning Load assumed. Save always stamps the
+// current SchemaVersion, so rewriting an entry persists the migration.
+func migrate(e Entry) Entry {
+	if e.Schema == 0 {
+		if e.Platform == "" {
+			e.Platform = PlatformAny
+		}
+	}
+	e.Schema = SchemaVersion
+	return e
 }
 
 // versionLess is a best-effort dotted-numeric compare with string fallback.

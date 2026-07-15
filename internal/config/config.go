@@ -107,6 +107,16 @@ func (p Paths) EnsureLayout() error {
 			return err
 		}
 	}
+	// Provenance logs are append-only; a union merge concatenates both sides
+	// so per-machine <hostname>.jsonl files never conflict on sync. (A same-
+	// hostname collision degrades to interleaved lines, which VerifyChain
+	// detects — far better than a failed pull.)
+	ga := filepath.Join(p.Home, ".gitattributes")
+	if _, err := os.Stat(ga); os.IsNotExist(err) {
+		if err := os.WriteFile(ga, []byte("provenance/*.jsonl merge=union\n"), 0o644); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

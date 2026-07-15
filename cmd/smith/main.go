@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -63,6 +64,10 @@ func main() {
 		err = cmdPublish(paths, args)
 	case "fetch":
 		err = cmdFetch(paths, args)
+	case "sync":
+		err = cmdSync(paths, args)
+	case "gc":
+		err = cmdGC(paths, args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -97,6 +102,8 @@ Usage:
   smith register <name>             sandbox-run the draft's self-test; pass -> Tier 0 + promotion request
   smith publish                     sign the manifest set + commit/push the index repo
   smith fetch <name>[@<ver>]        install a tool on this machine from the index (checksum + signature verified)
+  smith sync                        pull the index repo + reconcile: tools demoted upstream come off PATH now
+  smith gc [--older-than 30d] [--yes]  remove unpromoted Tier 0 versions + stale drafts (dry-run unless --yes)
 
 Tiers: 0 = authored (quarantined)  1 = trusted (PATH)  2 = external (quarantined)
 SMITH_HOME: ` + defaultHomeHint() + `
@@ -847,18 +854,28 @@ func cmdPublish(p config.Paths, args []string) error {
 			return fmt.Errorf("%s@%s is Tier 1 with a machine-local source — re-promote after configuring a transport", e.Name, e.Version)
 		}
 	}
+	// Nothing to publish if no manifest changed since the last commit (the
+	// signature's own timestamp would otherwise make index/ always dirty).
+	if out, _ := gitOutput(p, "status", "--porcelain", "index/tools"); strings.TrimSpace(out) == "" {
+		if _, statErr := os.Stat(filepath.Join(p.Home, "index", "index.sig")); statErr == nil {
+			fmt.Println("no manifest changes since last publish; nothing to do")
+			return nil
+		}
+	}
 	s, err := sign.SignIndex(p.Home, p.IndexTools, nowUTC())
 	if err != nil {
 		return err
 	}
 	fmt.Printf("signed manifest set: digest %s… key %s\n", s.Digest[:12], s.KeyFprint)
 
-	if err := gitInHome(p, "add", "index", "provenance"); err != nil {
+	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
+		Event: "publish", Actor: config.Actor(),
+		Origin: "digest:" + s.Digest[:16] + " key:" + s.KeyFprint,
+	}); err != nil {
 		return err
 	}
-	if out, _ := gitOutput(p, "status", "--porcelain"); strings.TrimSpace(out) == "" {
-		fmt.Println("index unchanged since last publish; nothing to commit")
-		return nil
+	if err := gitInHome(p, "add", "index", "provenance"); err != nil {
+		return err
 	}
 	if err := gitInHome(p, "commit", "-m", "smith publish "+nowUTC()); err != nil {
 		return err
@@ -1018,6 +1035,206 @@ func cmdFetch(p config.Paths, args []string) error {
 	}
 	fmt.Printf("fetched %s@%s -> tier %d (%s)\n", e.Name, e.Version, tier, dst)
 	return nil
+}
+
+// ---------------------------------------------------------------- sync
+
+// cmdSync pulls the index repo and reconciles the local store with it.
+// Its load-bearing job is propagating revocation (§7): a tool demoted on
+// another machine must come off THIS machine's PATH as soon as we sync,
+// even though its binary is still sitting in the local trusted store.
+func cmdSync(p config.Paths, args []string) error {
+	if err := p.EnsureLayout(); err != nil {
+		return err
+	}
+	if out, _ := gitOutput(p, "remote"); strings.TrimSpace(out) != "" {
+		// Commit this machine's local provenance before pulling so the pull
+		// has a clean tree. Each machine writes only its own <hostname>.jsonl,
+		// so a merge across distinct machines never conflicts.
+		if st, _ := gitOutput(p, "status", "--porcelain", "provenance"); strings.TrimSpace(st) != "" {
+			_ = gitInHome(p, "add", "provenance")
+			_ = gitInHome(p, "commit", "-m", "smith sync: local provenance "+nowUTC())
+		}
+		fmt.Fprintln(os.Stderr, "[smith] pulling index...")
+		if err := gitInHome(p, "pull", "--no-rebase", "--no-edit"); err != nil {
+			return fmt.Errorf("git pull failed (resolve manually in %s): %w", p.Home, err)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "[smith] no git remote; reconciling against local index only")
+	}
+
+	// Signature is advisory for revocation (removing trust is always safe),
+	// but report it so the operator knows the index's integrity state.
+	if present, err := sign.VerifyIndex(p.Home, p.IndexTools); present && err != nil {
+		fmt.Fprintf(os.Stderr, "[smith] WARNING: index signature invalid after pull: %v\n", err)
+	}
+
+	installed, err := store.InstalledVersions(p.StoreTrusted)
+	if err != nil {
+		return err
+	}
+	revoked := 0
+	for name, versions := range installed {
+		for _, version := range versions {
+			e, err := index.Load(p.IndexTools, name, version)
+			demoted := err != nil || e.Tier != 1
+			if !demoted {
+				continue
+			}
+			reason := "revoked upstream (tier changed)"
+			if err != nil {
+				reason = "revoked upstream (entry removed from index)"
+			}
+			if uerr := store.UnlinkVersion(p.TrustedBin, p.StoreTrusted, name, version); uerr != nil {
+				return uerr
+			}
+			if merr := store.Move(store.TrustedDir(p.StoreTrusted, name, version),
+				store.QuarantineDir(p.StoreQuarantine, name, version)); merr != nil {
+				return merr
+			}
+			if aerr := provenance.Append(p.ProvenanceLog, provenance.Entry{
+				Event: "demote", Tool: name, Version: version,
+				TierFrom: provenance.Tier(1), TierTo: provenance.Tier(2),
+				Actor: config.Actor(), Reason: "sync: " + reason,
+			}); aerr != nil {
+				return aerr
+			}
+			fmt.Printf("REVOKED %s@%s — off PATH, moved to quarantine (%s)\n", name, version, reason)
+			revoked++
+		}
+	}
+
+	// Report Tier 1 entries not installed here (fetch candidates) — sync
+	// never auto-fetches; that stays an explicit `smith fetch`.
+	available := 0
+	all, err := index.List(p.IndexTools)
+	if err != nil {
+		return err
+	}
+	for _, e := range all {
+		if e.Tier != 1 {
+			continue
+		}
+		if _, err := os.Stat(store.TrustedDir(p.StoreTrusted, e.Name, e.Version)); os.IsNotExist(err) {
+			if available == 0 {
+				fmt.Println("\ntrusted tools in the index not installed here:")
+			}
+			fmt.Printf("  %s@%s   (smith fetch %s)\n", e.Name, e.Version, e.Name)
+			available++
+		}
+	}
+	fmt.Printf("\nsync complete: %d revoked, %d available to fetch\n", revoked, available)
+	return nil
+}
+
+// ---------------------------------------------------------------- gc
+
+func cmdGC(p config.Paths, args []string) error {
+	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
+	olderThan := fs.String("older-than", "30d", "minimum age of a Tier 0 version before it is eligible (e.g. 7d, 24h)")
+	apply := fs.Bool("yes", false, "actually delete (default is a dry run)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cutoff, err := parseAge(*olderThan)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+
+	all, err := index.ListAll(p.IndexTools)
+	if err != nil {
+		return err
+	}
+	var victims []index.Entry
+	for _, e := range all {
+		if e.Tier != 0 {
+			continue // only unpromoted authored tools are GC-eligible
+		}
+		added, perr := time.Parse(time.RFC3339, e.AddedAt)
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "[smith] skip %s@%s: unparseable added_at %q\n", e.Name, e.Version, e.AddedAt)
+			continue
+		}
+		if now.Sub(added) >= cutoff {
+			victims = append(victims, e)
+		}
+	}
+
+	// Stale drafts: a draft whose version is not registered in the index.
+	var staleDrafts []string
+	if dirs, derr := os.ReadDir(filepath.Join(p.Home, "drafts")); derr == nil {
+		for _, d := range dirs {
+			if !d.IsDir() {
+				continue
+			}
+			m, merr := scaffold.LoadManifest(draftDir(p, d.Name()))
+			if merr != nil {
+				continue
+			}
+			if _, lerr := index.Load(p.IndexTools, m.Name, m.Version); lerr != nil {
+				staleDrafts = append(staleDrafts, d.Name())
+			}
+		}
+	}
+
+	if len(victims) == 0 && len(staleDrafts) == 0 {
+		fmt.Printf("nothing to collect (Tier 0 older than %s, unregistered drafts)\n", *olderThan)
+		return nil
+	}
+	verb := "would remove"
+	if *apply {
+		verb = "removing"
+	}
+	for _, e := range victims {
+		fmt.Printf("%s Tier 0 %s@%s (added %s)\n", verb, e.Name, e.Version, e.AddedAt)
+		if *apply {
+			if rerr := os.RemoveAll(store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)); rerr != nil {
+				return rerr
+			}
+			if rerr := os.RemoveAll(filepath.Join(p.IndexTools, e.Name, e.Version)); rerr != nil {
+				return rerr
+			}
+			// Prune the now-empty tool dir.
+			os.Remove(filepath.Join(p.IndexTools, e.Name))
+			if aerr := provenance.Append(p.ProvenanceLog, provenance.Entry{
+				Event: "gc", Tool: e.Name, Version: e.Version,
+				TierFrom: provenance.Tier(0), Actor: config.Actor(),
+				Reason: "gc: unpromoted Tier 0 older than " + *olderThan,
+			}); aerr != nil {
+				return aerr
+			}
+		}
+	}
+	for _, name := range staleDrafts {
+		fmt.Printf("%s stale draft %s\n", verb, name)
+		if *apply {
+			if rerr := os.RemoveAll(draftDir(p, name)); rerr != nil {
+				return rerr
+			}
+		}
+	}
+	if !*apply {
+		fmt.Println("\ndry run — re-run with --yes to delete")
+	}
+	return nil
+}
+
+// parseAge parses durations like "30d", "24h", "90m" into a time.Duration.
+func parseAge(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil || days < 0 {
+			return 0, fmt.Errorf("invalid age %q", s)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid age %q (use 30d, 24h, ...)", s)
+	}
+	return d, nil
 }
 
 // ---------------------------------------------------------------- verify
