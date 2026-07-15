@@ -99,9 +99,11 @@ Versions are themes, not promises; order within a release is by risk.
 - **Per-tool sandbox profiles**: manifest may request e.g. network egress to
   named hosts; the profile delta ships with the tool, is sha256-pinned as a
   doc, and is explicitly part of what the human reviews at promotion.
-- **`smith upgrade <name>`**: new-version flow for authored tools (copy
-  draft, bump, diff against promoted version shown at review) and externals
-  (re-add + re-verify, previous version demoted on promote).
+- ~~**`smith upgrade <name>`**~~ **Shipped**: authored → reseeds the draft
+  from the trusted source at a patch-bumped (or `--version`) version to edit
+  + re-register; external → adds the newer version via the full add pipeline
+  (Tier 2, own review). Old version stays until demoted. *(Still open: show a
+  diff vs the promoted version at review time.)*
 - ~~**Skill export**~~ **Shipped**: `smith promote` offers to install the
   tool's SKILL.md into `~/.claude/skills/<name>/` (config `skills.dir`,
   `skills.export: ask|always|never`), and `smith demote` removes it — so

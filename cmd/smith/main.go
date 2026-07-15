@@ -62,6 +62,8 @@ func main() {
 		err = cmdVerify(paths, args)
 	case "new":
 		err = cmdNew(paths, args)
+	case "upgrade":
+		err = cmdUpgrade(paths, args)
 	case "register":
 		err = cmdRegister(paths, args)
 	case "publish":
@@ -104,6 +106,7 @@ Usage:
   smith verify [--json]             re-check sha256 pins + provenance chain + PATH hygiene
   smith new <name> [--runtime bash|python] [--desc <text>]
                                     scaffold an agent-friendly CLI draft (cli-creator)
+  smith upgrade <name> [--version X]   new version: authored -> seed a draft from the trusted source; external -> add newer
   smith register <name>             sandbox-run the draft's self-test; pass -> Tier 0 + promotion request
   smith publish                     sign the manifest set + commit/push the index repo
   smith fetch <name>[@<ver>]        install a tool on this machine from the index (checksum + signature verified)
@@ -466,6 +469,124 @@ func cmdNew(p config.Paths, args []string) error {
   4. smith register %s   (runs the self-test sandboxed; pass -> Tier 0)
 `, dir, name, name)
 	return nil
+}
+
+// cmdUpgrade starts a new version of an existing tool. For an authored tool
+// it seeds the draft from the trusted source at a bumped version (edit, then
+// `smith register`). For an external tool it adds the newer version (which
+// lands at Tier 2 for its own review); the old version stays until demoted.
+func cmdUpgrade(p config.Paths, args []string) error {
+	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
+	version := fs.String("version", "", "target version (default: patch-bump for authored, mise latest for external)")
+	var name string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		name, args = args[0], args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if name == "" && fs.NArg() == 1 {
+		name = fs.Arg(0)
+	}
+	if name == "" {
+		return fmt.Errorf("usage: smith upgrade <name> [--version X]")
+	}
+	e, err := index.Resolve(p.IndexTools, name, "")
+	if err != nil {
+		return err
+	}
+
+	// External tool: adding the newer version reuses the full add pipeline
+	// (verify + lock + stubs + provenance); it lands at Tier 2 for review.
+	if strings.HasPrefix(e.Source, "mise:") {
+		target := *version
+		if target == "" {
+			v, err := misex.Latest(name)
+			if err != nil || v == "" {
+				return fmt.Errorf("could not resolve latest for %q via mise: %v", name, err)
+			}
+			target = v
+		}
+		if target == e.Version {
+			fmt.Printf("%s is already at %s (highest in index)\n", name, target)
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "[smith] upgrading external %s: %s -> %s\n", name, e.Version, target)
+		if err := cmdAdd(p, []string{name + "@" + target}); err != nil {
+			return err
+		}
+		fmt.Printf("\nold version %s@%s remains until you `smith demote` it\n", name, e.Version)
+		return nil
+	}
+
+	// Authored tool: seed the draft from the trusted/quarantined source at a
+	// bumped version.
+	target := *version
+	if target == "" {
+		bumped, err := bumpPatch(e.Version)
+		if err != nil {
+			return fmt.Errorf("cannot auto-bump %q: %v; pass --version", e.Version, err)
+		}
+		target = bumped
+	}
+	if _, err := index.Load(p.IndexTools, name, target); err == nil {
+		return fmt.Errorf("%s@%s already exists in the index; pick another --version", name, target)
+	}
+	base := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
+	if e.Tier == 1 {
+		base = store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
+	}
+	m, err := scaffold.LoadManifest(base) // manifest.yaml rides in the bundle
+	if err != nil {
+		return fmt.Errorf("reading source manifest from %s: %w", base, err)
+	}
+	dir := draftDir(p, name)
+	if err := os.RemoveAll(dir); err != nil { // reseed from the trusted source
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	// Copy source bundle -> draft: entrypoint + selftest (from bin/), docs.
+	for _, f := range []struct {
+		src, dst string
+		mode     os.FileMode
+	}{
+		{filepath.Join("bin", m.Entrypoint), m.Entrypoint, 0o755},
+		{filepath.Join("bin", "selftest.sh"), "selftest.sh", 0o755},
+		{"SKILL.md", "SKILL.md", 0o644},
+	} {
+		raw, err := os.ReadFile(filepath.Join(base, f.src))
+		if err != nil {
+			continue // selftest/SKILL optional
+		}
+		if err := os.WriteFile(filepath.Join(dir, f.dst), raw, f.mode); err != nil {
+			return err
+		}
+	}
+	m.Version = target
+	if err := scaffold.SaveManifest(dir, m); err != nil {
+		return err
+	}
+	fmt.Printf("seeded draft %s from %s@%s (tier %d), bumped to %s\n", dir, name, e.Version, e.Tier, target)
+	fmt.Printf(`next steps:
+  1. edit %s/%s (and selftest.sh / SKILL.md)
+  2. smith register %s   (self-test sandboxed; pass -> Tier 0 @ %s)
+  3. smith review %s && smith promote %s@%s
+`, dir, m.Entrypoint, name, target, name, name, target)
+	return nil
+}
+
+// bumpPatch increments the last dotted-numeric segment of a version.
+func bumpPatch(v string) (string, error) {
+	parts := strings.Split(v, ".")
+	last := parts[len(parts)-1]
+	n, err := strconv.Atoi(last)
+	if err != nil {
+		return "", fmt.Errorf("last segment %q is not numeric", last)
+	}
+	parts[len(parts)-1] = strconv.Itoa(n + 1)
+	return strings.Join(parts, "."), nil
 }
 
 func cmdRegister(p config.Paths, args []string) error {

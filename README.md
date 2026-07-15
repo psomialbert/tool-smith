@@ -19,6 +19,7 @@ the decisions taken.
 | `smith verify` | ✅ provenance hash-chain + all sha256 pins + PATH hygiene + trusted-bin symlink containment |
 | `smith new <name>` | ✅ scaffolds an agent-friendly CLI draft (bash / python-stdlib) in `$SMITH_HOME/drafts/` with self-test, SKILL.md stub, draft manifest |
 | `smith register <name>` | ✅ runs the draft's self-test **inside the sandbox**; failure blocks registration; pass → Tier 0 quarantine + printed promotion request |
+| `smith upgrade <name> [--version X]` | ✅ v0.4: authored → reseeds the draft from the trusted source at a patch-bumped (or given) version to edit + re-register; external → adds the newer version (Tier 2, own review). Old version stays until demoted |
 | `smith promote` (full) | ✅ authored tools: blob is packed, sha256-pinned, and pushed to the shared transport **before** the trust transition — promotion refused if no transport or push fails |
 | `smith publish` | ✅ ed25519-signs the manifest set (`index/index.sig`), commits index+provenance in the `$SMITH_HOME` git repo, pushes if a remote exists; refuses if a Tier 1 entry still has a machine-local source |
 | `smith fetch <name>[@ver]` | ✅ machine B: installs from the index alone — blob (or mise re-install) fetched, blob + every artifact checksum verified; Tier 1 requires a **valid index signature**, otherwise lands quarantined at Tier 2 |

@@ -84,6 +84,16 @@ func Create(dir string, m Manifest) error {
 	return os.WriteFile(filepath.Join(dir, "manifest.yaml"), raw, 0o644)
 }
 
+// SaveManifest writes m to dir/manifest.yaml (used by `smith upgrade` when
+// reseeding a draft at a bumped version).
+func SaveManifest(dir string, m Manifest) error {
+	raw, err := yaml.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "manifest.yaml"), raw, 0o644)
+}
+
 func LoadManifest(dir string) (Manifest, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
 	if err != nil {
