@@ -1,0 +1,54 @@
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#   # Declare third-party deps here, pinned. `smith register` locks them with
+#   # hashes (uv lock) and warms a tool-local cache so runs are offline.
+#   # Example: "six==1.16.0"
+# ]
+# ///
+"""{{NAME}} — {{DESC}}
+
+Agent-friendly contract: --json machine output, --quiet, non-interactive,
+errors to stderr, exit codes: 0 ok / 1 runtime error / 2 usage error.
+
+Runs via `uv run` with the deps above. Reviewers: the locked dependency tree
+(with hashes) is in {{NAME}}.py.lock — vet what third-party code this pulls.
+Deps execute at run time; the lockfile makes the tree reproducible, not safe.
+"""
+import argparse
+import json
+import sys
+
+VERSION = "{{VERSION}}"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="{{NAME}}", description="{{DESC}}",
+                                epilog="Exit codes: 0 ok, 1 runtime error, 2 usage error")
+    p.add_argument("--json", action="store_true", help="machine-readable JSON on stdout")
+    p.add_argument("--quiet", action="store_true", help="suppress non-essential human output")
+    p.add_argument("--version", action="version", version=VERSION)
+    p.add_argument("args", nargs="*")
+    return p
+
+
+def emit(opts, machine: dict, human: str) -> None:
+    if opts.json:
+        print(json.dumps(machine))
+    elif not opts.quiet:
+        print(human)
+
+
+def main() -> int:
+    opts = build_parser().parse_args()
+    try:
+        # TODO: implement {{NAME}} using your declared dependencies.
+        emit(opts, {"ok": True, "args": len(opts.args)}, f"ok ({len(opts.args)} args)")
+        return 0
+    except Exception as e:  # noqa: BLE001 — tool boundary
+        print(f"{{NAME}}: error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

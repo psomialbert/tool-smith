@@ -196,13 +196,24 @@ func PackBlob(srcDir, dstPath string) error {
 		if err != nil {
 			return err
 		}
-		hdr := &tar.Header{
-			Name: filepath.ToSlash(rel),
-			Mode: int64(info.Mode().Perm()),
-			Size: info.Size(),
+		// Symlinks (uv caches use them) are recorded as links, not followed —
+		// following would write target bytes past the header size.
+		link := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			if link, err = os.Readlink(path); err != nil {
+				return err
+			}
 		}
+		hdr, err := tar.FileInfoHeader(info, link)
+		if err != nil {
+			return err
+		}
+		hdr.Name = filepath.ToSlash(rel)
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil // symlink/other: header only
 		}
 		in, err := os.Open(path)
 		if err != nil {
@@ -241,7 +252,7 @@ func UnpackBlob(blobPath, dstDir string) error {
 		if err != nil {
 			return err
 		}
-		if hdr.Typeflag != tar.TypeReg {
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeSymlink {
 			continue
 		}
 		clean := filepath.Clean(hdr.Name)
@@ -251,6 +262,17 @@ func UnpackBlob(blobPath, dstDir string) error {
 		dst := filepath.Join(dstDir, clean)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
+		}
+		if hdr.Typeflag == tar.TypeSymlink {
+			// Refuse absolute or escaping link targets (defense in depth).
+			if filepath.IsAbs(hdr.Linkname) || strings.HasPrefix(filepath.Clean(hdr.Linkname), "..") {
+				return fmt.Errorf("blob symlink %q escapes: %q", hdr.Name, hdr.Linkname)
+			}
+			os.Remove(dst)
+			if err := os.Symlink(hdr.Linkname, dst); err != nil {
+				return err
+			}
+			continue
 		}
 		out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(hdr.Mode).Perm())
 		if err != nil {

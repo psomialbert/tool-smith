@@ -17,14 +17,17 @@ import (
 //go:embed templates/*
 var templates embed.FS
 
-var Runtimes = []string{"bash", "python", "go"}
+var Runtimes = []string{"bash", "python", "go", "python-uv"}
 
-// SourceFile returns the draft source filename for a compiled runtime (the
-// file that isn't the executable entrypoint), or "" for interpreted runtimes
-// whose entrypoint IS the source.
+// SourceFile returns the draft source filename for a compiled/wrapped runtime
+// (the file that isn't the executable entrypoint), or "" for interpreted
+// runtimes whose entrypoint IS the source.
 func SourceFile(m Manifest) string {
-	if m.Runtime == "go" {
+	switch m.Runtime {
+	case "go":
 		return "main.go"
+	case "python-uv":
+		return m.Name + ".py"
 	}
 	return ""
 }

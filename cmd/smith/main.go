@@ -608,6 +608,9 @@ func cmdRegister(p config.Paths, args []string) error {
 	if _, err := index.Load(p.IndexTools, m.Name, m.Version); err == nil {
 		return fmt.Errorf("%s@%s already registered; bump version in %s/manifest.yaml", m.Name, m.Version, dir)
 	}
+	if m.Runtime == "python-uv" {
+		return registerPythonUV(p, dir, m)
+	}
 	// Compiled runtimes build the entrypoint from source first. The Go
 	// toolchain runs unsandboxed here (it is trusted), offline (GOPROXY=off);
 	// promotion review reads main.go, so `//go:embed`/cgo are visible.
@@ -712,6 +715,140 @@ func buildGoTool(dir, out string) error {
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOPROXY=off", "GOFLAGS=-mod=mod")
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	return cmd.Run()
+}
+
+// pythonUVLauncher is the entrypoint for a python-uv tool. It resolves its
+// real location (following the Tier-1 PATH symlink), mirrors the tool-local
+// uv cache to a writable temp (the store cache is read-only under the
+// sandbox, and uv writes to its cache at run), and runs the script offline.
+func pythonUVLauncher(srcFile string) string {
+	return `#!/bin/bash
+set -e
+target="$0"
+while [ -L "$target" ]; do
+  link="$(readlink "$target")"
+  case "$link" in /*) target="$link";; *) target="$(dirname "$target")/$link";; esac
+done
+here="$(cd "$(dirname "$target")" && pwd)"
+cache="$(mktemp -d)/cache"
+cp -R "$here/uv-cache" "$cache"
+export UV_CACHE_DIR="$cache"
+exec uv run --offline --script "$here/` + srcFile + `" "$@"
+`
+}
+
+// warmUVCache populates the tool-local uv cache by resolving+installing the
+// script's locked deps. It runs in a NETWORK-allowed sandbox with a sanitized
+// env and writes confined to the draft dir — so this one step, which touches
+// PyPI and runs unreviewed dep code to build the env, can't reach secrets or
+// the wider filesystem.
+func warmUVCache(p config.Paths, dir, srcPath string) error {
+	argv, err := sandbox.Command(p.SandboxProfiles, dir, sandbox.Perms{Network: true},
+		[]string{"uv", "run", "--script", srcPath, "--version"})
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = dir
+	env, err := sandbox.Env(nil)
+	if err != nil {
+		return err
+	}
+	cmd.Env = append(env, "UV_CACHE_DIR="+filepath.Join(dir, "uv-cache"))
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	return cmd.Run()
+}
+
+// registerPythonUV locks a PEP 723 script's deps (with hashes), generates the
+// uv launcher, warms a tool-local cache, self-tests offline, and bundles it
+// flat (launcher + script + lock + cache as siblings) so the launcher resolves
+// identically in the draft, the store, and on the Tier-1 PATH. python-uv
+// tools are platform-specific (the cache holds platform wheels).
+func registerPythonUV(p config.Paths, dir string, m scaffold.Manifest) error {
+	if _, err := exec.LookPath("uv"); err != nil {
+		return fmt.Errorf("uv not found on PATH (required for python-uv tools)")
+	}
+	src := m.Name + ".py"
+	srcPath := filepath.Join(dir, src)
+	if _, err := os.Stat(srcPath); err != nil {
+		return fmt.Errorf("source %s missing in draft", src)
+	}
+	// 1. Lock deps with hashes (reproducible; the review surface).
+	lock := exec.Command("uv", "lock", "--script", srcPath)
+	lock.Stdout, lock.Stderr = os.Stderr, os.Stderr
+	if err := lock.Run(); err != nil {
+		return fmt.Errorf("uv lock failed — not registered: %w", err)
+	}
+	// 2. Launcher.
+	if err := os.WriteFile(filepath.Join(dir, m.Entrypoint), []byte(pythonUVLauncher(src)), 0o755); err != nil {
+		return err
+	}
+	// 3. Warm the tool-local cache (network-sandboxed).
+	if err := warmUVCache(p, dir, srcPath); err != nil {
+		return fmt.Errorf("warming uv cache failed — not registered: %w", err)
+	}
+	// 4. Self-test offline (strict sandbox) through the launcher.
+	if err := runSelfTest(p, dir, filepath.Join(dir, m.Entrypoint)); err != nil {
+		return fmt.Errorf("self-test FAILED — not registered: %w", err)
+	}
+	// 5. Flat bundle: launcher + selftest (executables) at the top, then the
+	// script/lock/docs and the cache tree, so the launcher's siblings match.
+	qdir := store.QuarantineDir(p.StoreQuarantine, m.Name, m.Version)
+	if _, err := os.Stat(qdir); err == nil {
+		return fmt.Errorf("quarantine dir already exists: %s", qdir)
+	}
+	if _, err := store.CopyExecutables(dir, qdir); err != nil { // launcher + selftest.sh -> qdir/
+		return err
+	}
+	// cp -R handles the uv cache's symlinks/permissions natively.
+	if err := os.MkdirAll(qdir, 0o755); err != nil {
+		return err
+	}
+	cp := exec.Command("cp", "-R", filepath.Join(dir, "uv-cache"), filepath.Join(qdir, "uv-cache"))
+	cp.Stderr = os.Stderr
+	if err := cp.Run(); err != nil {
+		return fmt.Errorf("copying uv cache: %w", err)
+	}
+	e := index.Entry{
+		Name: m.Name, Version: m.Version, Platform: index.CurrentPlatform(), Tier: 0,
+		Origin: "authored:" + config.Actor(), Source: "local:" + dir,
+		AddedAt: nowUTC(),
+	}
+	binArt, err := pinFile(qdir, m.Entrypoint)
+	if err != nil {
+		return err
+	}
+	e.Artifacts = []index.Artifact{binArt}
+	for _, doc := range []string{"SKILL.md", "manifest.yaml", src, src + ".lock", "selftest.sh"} {
+		srcp := filepath.Join(dir, doc)
+		if _, err := os.Stat(srcp); err != nil {
+			continue
+		}
+		if err := copyPlain(srcp, filepath.Join(qdir, doc)); err != nil {
+			return err
+		}
+		a, err := pinFile(qdir, doc)
+		if err != nil {
+			return err
+		}
+		e.Docs = append(e.Docs, a)
+	}
+	if err := index.Save(p.IndexTools, e); err != nil {
+		return err
+	}
+	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
+		Event: "author", Tool: m.Name, Version: m.Version,
+		TierTo: provenance.Tier(0), Actor: config.Actor(),
+		Origin: e.Source, SelfTest: "pass",
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("registered %s@%s at Tier 0 (authored python-uv, quarantined)\n", m.Name, m.Version)
+	fmt.Printf("  store: %s\n  %s  sha256=%s\n", qdir, binArt.Path, binArt.Sha256)
+	fmt.Printf("  deps locked with hashes in %s.lock — review the dependency tree\n", src)
+	fmt.Printf("\nPROMOTION REQUEST — human action required\n  review: read %s, %s.lock, and selftest.sh\n  approve: smith promote %s@%s   (interactive terminal only)\nuntil then: runnable only via `smith run %s` (sandboxed, offline)\n",
+		src, src, m.Name, m.Version, m.Name)
+	return nil
 }
 
 // runSelfTest executes <draft>/selftest.sh <entrypoint> sandboxed, from a

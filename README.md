@@ -17,7 +17,7 @@ the decisions taken.
 | `smith promote` | ✅ interactive-TTY-gated review → moves quarantine→trusted, symlinks onto PATH, provenance records reviewer; offers to export the tool's SKILL.md into `~/.claude/skills/<name>/` so sessions discover it (config `skills.export`) |
 | `smith demote <spec> --reason` | ✅ off PATH immediately, back to quarantine, reason recorded; removes the exported skill so discovery stays in sync with trust |
 | `smith verify` | ✅ provenance hash-chain + all sha256 pins + PATH hygiene + trusted-bin symlink containment |
-| `smith new <name>` | ✅ scaffolds an agent-friendly CLI draft (bash / python-stdlib / **go**) in `$SMITH_HOME/drafts/` with self-test, SKILL.md stub, draft manifest; go tools compile at register (platform-specific) |
+| `smith new <name>` | ✅ scaffolds an agent-friendly CLI draft — `bash` / `python` (stdlib) / `go` (compiled) / `python-uv` (PEP 723 + deps) — with self-test, SKILL.md stub, manifest. Go/python-uv register produces platform-specific tools; python-uv locks deps with hashes, warms a tool-local cache, runs offline |
 | `smith register <name>` | ✅ runs the draft's self-test **inside the sandbox**; failure blocks registration; pass → Tier 0 quarantine + printed promotion request |
 | `smith upgrade <name> [--version X]` | ✅ v0.4: authored → reseeds the draft from the trusted source at a patch-bumped (or given) version to edit + re-register; external → adds the newer version (Tier 2, own review). Old version stays until demoted |
 | `smith promote` (full) | ✅ authored tools: blob is packed, sha256-pinned, and pushed to the shared transport **before** the trust transition — promotion refused if no transport or push fails |

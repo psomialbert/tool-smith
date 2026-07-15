@@ -88,26 +88,23 @@ Versions are themes, not promises; order within a release is by risk.
 
 ## v0.4 — Authoring depth
 
-- **Python with dependencies** — *deferred (design below), not shipped.* The
-  uv mechanics are proven: `uv lock --script tool.py` emits a hash-locked
-  `tool.py.lock` (review surface), and `uv run --offline` with a tool-local
-  `UV_CACHE_DIR` runs without network. The hard parts are smith-integration,
-  not uv:
-  - **run mechanism.** A uv script isn't directly executable offline; it
-    needs `uv run --offline --script <py>` with `UV_CACHE_DIR` set. Either a
-    self-locating launcher in the bundle (must resolve identically in the
-    draft and the store) or run-path special-casing.
-  - **Tier-1 PATH.** A bare `<name>` symlink on PATH can't run a uv script;
-    promotion would need to install a launcher with absolute trusted paths,
-    and demote must remove it (today demote only unlinks symlinks).
-  - **cross-machine.** The warmed cache holds platform-specific wheels, so
-    the tool is platform-specific (like Go); fetch machines must re-warm.
-  - **supply chain.** deps execute at run; warming runs unreviewed code with
-    network (contain in a network-sandbox with sanitized env + confined
-    writes), and sdists can run code at install (prefer wheel-only). The
-    lockfile makes it reproducible, not safe — the dep tree is part of review.
-  Shipping this with a broken promotion path would be worse than waiting;
-  it's a focused follow-up, not a wire-up.
+- ~~**Python with dependencies**~~ **Shipped**: `smith new --runtime
+  python-uv` scaffolds a PEP 723 script. `smith register` runs `uv lock`
+  (hash-locked `<name>.py.lock` — the review surface), generates a
+  self-locating launcher, warms a tool-local cache in a **network-sandbox**
+  (sanitized env, confined writes — so dep download/build can't reach
+  secrets), and self-tests **offline** under the strict sandbox. Runs use
+  `uv run --offline` from the tool cache (the launcher mirrors it to a
+  writable temp, since the store is read-only under the sandbox). The
+  launcher resolves its real path (following the Tier-1 PATH symlink), so it
+  works at Tier 0/2 and Tier 1. python-uv tools are platform-specific (the
+  cache holds platform wheels), like Go. *Verified end-to-end: a tool using
+  `six` registers, runs offline sandboxed (`{"six":"1.16.0"}`), fails with
+  the cache removed (no network fallback), promotes, and runs via the Tier-1
+  PATH launcher. Supply-chain note: deps execute at run; the lockfile makes
+  the tree reproducible, not safe — the dep tree is part of promotion review.*
+  *(Still open: wheel-only enforcement to avoid sdist install-time code;
+  cross-platform fetch re-warm.)*
 - ~~**Go template**~~ **Shipped**: `smith register` compiles main.go offline
   (GOPROXY=off, CGO_ENABLED=0, -trimpath); Go tools are platform-specific
   (platform=GOOS-GOARCH), main.go pinned as a source doc. *(Still open:
