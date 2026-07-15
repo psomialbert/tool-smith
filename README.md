@@ -17,13 +17,15 @@ the decisions taken.
 | `smith promote` | ✅ interactive-TTY-gated review → moves quarantine→trusted, symlinks onto PATH, provenance records reviewer; offers to export the tool's SKILL.md into `~/.claude/skills/<name>/` so sessions discover it (config `skills.export`) |
 | `smith demote <spec> --reason` | ✅ off PATH immediately, back to quarantine, reason recorded; removes the exported skill so discovery stays in sync with trust |
 | `smith verify` | ✅ provenance hash-chain + all sha256 pins + PATH hygiene + trusted-bin symlink containment |
-| `smith new <name>` | ✅ scaffolds an agent-friendly CLI draft (bash / python-stdlib) in `$SMITH_HOME/drafts/` with self-test, SKILL.md stub, draft manifest |
+| `smith new <name>` | ✅ scaffolds an agent-friendly CLI draft (bash / python-stdlib / **go**) in `$SMITH_HOME/drafts/` with self-test, SKILL.md stub, draft manifest; go tools compile at register (platform-specific) |
 | `smith register <name>` | ✅ runs the draft's self-test **inside the sandbox**; failure blocks registration; pass → Tier 0 quarantine + printed promotion request |
 | `smith upgrade <name> [--version X]` | ✅ v0.4: authored → reseeds the draft from the trusted source at a patch-bumped (or given) version to edit + re-register; external → adds the newer version (Tier 2, own review). Old version stays until demoted |
 | `smith promote` (full) | ✅ authored tools: blob is packed, sha256-pinned, and pushed to the shared transport **before** the trust transition — promotion refused if no transport or push fails |
 | `smith publish` | ✅ ed25519-signs the manifest set (`index/index.sig`), commits index+provenance in the `$SMITH_HOME` git repo, pushes if a remote exists; refuses if a Tier 1 entry still has a machine-local source |
 | `smith fetch <name>[@ver]` | ✅ machine B: installs from the index alone — blob (or mise re-install) fetched, blob + every artifact checksum verified; Tier 1 requires a **valid index signature**, otherwise lands quarantined at Tier 2 |
-| `smith verify` | ✅ now also validates the index signature and every per-machine provenance chain |
+| `smith verify` | ✅ now also validates the index signature and every per-machine provenance chain; `--sandbox` runs the live escape battery (write confinement, network deny/grant) |
+| `smith key list\|rotate\|add\|revoke` | ✅ v1.0: multi-key trust set (`index/authorized_keys`) + rotation with a validity window; lets a second machine publish. Trust rooted in repo access + TOFU `smith.pub` |
+| per-tool sandbox grant | ✅ manifest `sandbox: {network: true}` grants egress to a Tier 0/2 tool's `smith run`; surfaced at review; default is deny-all |
 | `smith add` hardening | ✅ Phase 3: verification level decided before any download — `gh-attestation` (SLSA provenance verified over the exact downloaded archive) > `aqua-registry` (curated checksums via mise) > `tofu` (refused unless `--allow-unverified`); level recorded in index + provenance and shown at promotion review |
 | `smith sync` | ✅ v0.2: `git pull` the index + reconcile — tools demoted/removed upstream come off PATH and into quarantine immediately (provenance-logged); uninstalled Tier 1 entries reported as fetch candidates. Propagates revocation across machines |
 | `smith gc` | ✅ v0.2: dry-run by default; `--older-than 30d --yes` removes only unpromoted Tier 0 versions past the cutoff + unregistered drafts; never touches Tier 1/2 |

@@ -88,17 +88,36 @@ Versions are themes, not promises; order within a release is by risk.
 
 ## v0.4 — Authoring depth
 
-- **Python with dependencies**: PEP 723 template; at `smith register`, warm
-  a per-tool `UV_CACHE_DIR` inside the tool's version dir (network allowed
-  for that one controlled step), then all sandboxed runs use
-  `uv run --offline` with writes allowed only to that tool-private cache.
-  No shared mutable cache = no cross-tool poisoning path.
-- **Go template**: compiled per platform; artifacts become per-platform
-  blobs (index already supports this); `smith register` builds for the host,
-  `smith promote` optionally cross-compiles + pushes all platform blobs.
-- **Per-tool sandbox profiles**: manifest may request e.g. network egress to
-  named hosts; the profile delta ships with the tool, is sha256-pinned as a
-  doc, and is explicitly part of what the human reviews at promotion.
+- **Python with dependencies** — *deferred (design below), not shipped.* The
+  uv mechanics are proven: `uv lock --script tool.py` emits a hash-locked
+  `tool.py.lock` (review surface), and `uv run --offline` with a tool-local
+  `UV_CACHE_DIR` runs without network. The hard parts are smith-integration,
+  not uv:
+  - **run mechanism.** A uv script isn't directly executable offline; it
+    needs `uv run --offline --script <py>` with `UV_CACHE_DIR` set. Either a
+    self-locating launcher in the bundle (must resolve identically in the
+    draft and the store) or run-path special-casing.
+  - **Tier-1 PATH.** A bare `<name>` symlink on PATH can't run a uv script;
+    promotion would need to install a launcher with absolute trusted paths,
+    and demote must remove it (today demote only unlinks symlinks).
+  - **cross-machine.** The warmed cache holds platform-specific wheels, so
+    the tool is platform-specific (like Go); fetch machines must re-warm.
+  - **supply chain.** deps execute at run; warming runs unreviewed code with
+    network (contain in a network-sandbox with sanitized env + confined
+    writes), and sdists can run code at install (prefer wheel-only). The
+    lockfile makes it reproducible, not safe — the dep tree is part of review.
+  Shipping this with a broken promotion path would be worse than waiting;
+  it's a focused follow-up, not a wire-up.
+- ~~**Go template**~~ **Shipped**: `smith register` compiles main.go offline
+  (GOPROXY=off, CGO_ENABLED=0, -trimpath); Go tools are platform-specific
+  (platform=GOOS-GOARCH), main.go pinned as a source doc. *(Still open:
+  cross-compile + per-platform blobs at promote; today it's host-platform.)*
+- ~~**Per-tool sandbox profiles**~~ **Shipped**: manifest `sandbox: {network:
+  true}` grants egress to a Tier 0/2 tool's `smith run`; the grant is in the
+  pinned manifest and surfaced at review ("NETWORK egress requested").
+  Seatbelt profile generated per permission-set; linux drops `--unshare-net`.
+  Self-tests always run strict (least-trusted moment). *(Named-host egress
+  is future; today it's all-or-nothing network.)*
 - ~~**`smith upgrade <name>`**~~ **Shipped**: authored → reseeds the draft
   from the trusted source at a patch-bumped (or `--version`) version to edit
   + re-register; external → adds the newer version via the full add pipeline
@@ -116,10 +135,11 @@ Versions are themes, not promises; order within a release is by risk.
   backend (Apple `containerization` / Lima) selected per tool or globally —
   same `sandbox.Command` seam, so tools don't notice. Decision forced only
   if Apple removes `sandbox-exec`.
-- **Escape-test suite as a first-class check**: `smith verify --sandbox`
-  runs the hostile-tool battery (env leak, write escape, network egress,
-  /proc & keychain probes) on the *active* mechanism — the linux-e2e escape
-  test generalized and runnable everywhere.
+- ~~**Escape-test suite as a first-class check**~~ **Shipped**: `smith verify
+  --sandbox` runs the hostile-tool battery (write escape → $HOME blocked, CWD
+  write works, network denied by default, permitted under a grant) on the
+  *active* mechanism. Verified on darwin (Seatbelt) and linux (bwrap).
+  *(Could add more probes: env leak, /proc & keychain.)*
 - Linux: evaluate Landlock as a bwrap complement for unprivileged
   environments where user namespaces are disabled.
 
@@ -128,9 +148,12 @@ Versions are themes, not promises; order within a release is by risk.
 - **smith distributes smith**: tagged releases with GitHub attestations;
   `smith add smith` works from the public repo at `gh-attestation` level;
   the index carries its own tooling. Dogfood-complete.
-- **Key lifecycle**: rotation command (re-sign with new key, old pubkey
-  retained for verification window), multiple authorized pubkeys so a second
-  machine can publish without copying the primary key.
+- ~~**Key lifecycle**~~ **Shipped**: `smith key list|rotate|add|revoke`.
+  Rotate installs a fresh key, keeps the outgoing one authorized for its
+  window, re-signs; `index/authorized_keys` is a multi-key trust set so a
+  second machine can publish without copying the primary key. Trust rests on
+  repo access + the TOFU smith.pub root (authorized_keys deliberately not in
+  the signed digest — see sign.go).
 - Docs pass; cut v1.0.0 when a stranger to this repo can go
   clone → init → author → promote → publish → fetch on machine B without us.
 

@@ -19,6 +19,16 @@ var templates embed.FS
 
 var Runtimes = []string{"bash", "python", "go"}
 
+// SourceFile returns the draft source filename for a compiled runtime (the
+// file that isn't the executable entrypoint), or "" for interpreted runtimes
+// whose entrypoint IS the source.
+func SourceFile(m Manifest) string {
+	if m.Runtime == "go" {
+		return "main.go"
+	}
+	return ""
+}
+
 // Manifest is the draft manifest (unversioned-draft in spec terms: it exists
 // only in the draft dir until registration pins it into the index).
 type Manifest struct {
@@ -75,13 +85,13 @@ func Create(dir string, m Manifest) error {
 		"selftest.sh": {"selftest.sh", 0o755},
 		"SKILL.md":    {"SKILL.md", 0o644},
 	}
-	if m.Runtime == "go" {
-		// Compiled: the source is main.go; `smith register` builds the
-		// entrypoint binary (which is platform-specific).
-		files["main.go"] = struct {
+	if src := SourceFile(m); src != "" {
+		// Compiled/wrapped: source is separate; `smith register` produces the
+		// entrypoint (Go: compiled binary; python-uv: uv launcher).
+		files[src] = struct {
 			tpl  string
 			mode os.FileMode
-		}{"tool.go", 0o644}
+		}{"tool." + m.Runtime, 0o644}
 	} else {
 		// Interpreted: the entrypoint file IS the source and is executable.
 		files[m.Entrypoint] = struct {
