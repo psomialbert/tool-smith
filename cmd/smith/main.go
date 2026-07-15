@@ -50,6 +50,8 @@ func main() {
 		err = cmdList(paths, args)
 	case "run":
 		err = cmdRun(paths, args)
+	case "review":
+		err = cmdReview(paths, args)
 	case "promote":
 		err = cmdPromote(paths, args)
 	case "demote":
@@ -94,6 +96,7 @@ Usage:
   smith list [--json]               list tools with version, tier, origin
   smith status [--json]             alias of list
   smith run <name>[@<ver>] [args]   run a tool (Tier 0/2 forced into sandbox)
+  smith review <name>[@<ver>] [--inline|--edit|--paths]   read a tool's source before promoting
   smith promote <name>[@<ver>]      human-gated: quarantine -> trusted (Tier 1, on PATH)
   smith demote <name>[@<ver>] --reason <why>   trusted -> quarantine, off PATH now
   smith verify [--json]             re-check sha256 pins + provenance chain + PATH hygiene
@@ -674,6 +677,245 @@ func pickArtifact(e index.Entry, name string) (index.Artifact, error) {
 	return index.Artifact{}, fmt.Errorf("%s@%s ships several binaries (%s); run one by its own name", e.Name, e.Version, strings.Join(names, ", "))
 }
 
+// ---------------------------------------------------------------- review
+
+// cmdReview surfaces everything a human needs to make the promotion decision
+// (§7): it re-checks the on-disk bytes against their pins, prints provenance,
+// and shows the source — inline, in $VISUAL/$EDITOR, or as paths to open.
+// Read-only; it never changes tiers.
+func cmdReview(p config.Paths, args []string) error {
+	fs := flag.NewFlagSet("review", flag.ContinueOnError)
+	inline := fs.Bool("inline", false, "print the source to stdout")
+	edit := fs.Bool("edit", false, "open the bundle in $VISUAL/$EDITOR")
+	paths := fs.Bool("paths", false, "print file paths only")
+	var spec string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		spec, args = args[0], args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if spec == "" && fs.NArg() == 1 {
+		spec = fs.Arg(0)
+	}
+	if spec == "" {
+		return fmt.Errorf("usage: smith review <name>[@<version>] [--inline|--edit|--paths]")
+	}
+	name, version := splitSpec(spec)
+	e, err := index.Resolve(p.IndexTools, name, version)
+	if err != nil {
+		return err
+	}
+	base := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
+	if e.Tier == 1 {
+		base = store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
+	}
+
+	tierName := map[int]string{0: "0 authored (pending review)", 1: "1 TRUSTED", 2: "2 external (pending review)"}
+	fmt.Printf("== %s@%s ==\n", e.Name, e.Version)
+	fmt.Printf("tier:         %s\n", tierName[e.Tier])
+	fmt.Printf("origin:       %s\n", e.Origin)
+	fmt.Printf("source:       %s\n", e.Source)
+	fmt.Printf("added:        %s\n", e.AddedAt)
+	if e.Verification != "" {
+		fmt.Printf("verification: %s\n", e.Verification)
+	}
+
+	// Integrity: the bytes you're about to read must match the pins, or the
+	// review is meaningless.
+	fmt.Println("\nintegrity (pinned bytes vs on-disk):")
+	allPinned := append(append([]index.Artifact{}, e.Artifacts...), e.Docs...)
+	drift := false
+	for _, a := range allPinned {
+		sum, herr := store.HashFile(filepath.Join(base, a.Path))
+		switch {
+		case herr != nil:
+			fmt.Printf("  MISSING  %s (%v)\n", a.Path, herr)
+			drift = true
+		case sum != a.Sha256:
+			fmt.Printf("  MISMATCH %s\n", a.Path)
+			drift = true
+		default:
+			fmt.Printf("  ok       %s\n", a.Path)
+		}
+	}
+	if drift {
+		fmt.Fprintln(os.Stderr, "\n[smith] WARNING: on-disk bytes differ from the pinned hashes — do NOT promote; investigate.")
+	}
+
+	// Provenance for this tool across all machines' logs.
+	if entries := provenanceFor(p, e.Name, e.Version); len(entries) > 0 {
+		fmt.Println("\nprovenance:")
+		for _, pe := range entries {
+			line := fmt.Sprintf("  %s  %-8s actor=%s", pe.Time, pe.Event, pe.Actor)
+			if pe.SelfTest != "" {
+				line += " self-test=" + pe.SelfTest
+			}
+			if pe.Reviewer != "" {
+				line += " reviewer=" + pe.Reviewer
+			}
+			if pe.Reason != "" {
+				line += " reason=" + pe.Reason
+			}
+			fmt.Println(line)
+		}
+	}
+
+	files, err := bundleFiles(base)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\nbundle (%d files) in %s:\n", len(files), base)
+	for _, f := range files {
+		fmt.Printf("  %s\n", f)
+	}
+
+	// Pick a mode. Explicit flags win; otherwise prompt on a TTY, else print
+	// inline (composable / agent-readable).
+	mode := ""
+	switch {
+	case *edit:
+		mode = "e"
+	case *paths:
+		mode = "p"
+	case *inline:
+		mode = "i"
+	case term.IsTerminal(int(os.Stdin.Fd())):
+		fmt.Print("\nreview: [i]nline  [e]ditor  [p]aths  [q]uit > ")
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		mode = strings.TrimSpace(strings.ToLower(line))
+	default:
+		mode = "i"
+	}
+
+	switch mode {
+	case "q", "":
+		return nil
+	case "p":
+		for _, f := range files {
+			fmt.Println(filepath.Join(base, f))
+		}
+	case "e":
+		return openInEditor(base, files)
+	case "i":
+		if err := printInline(base, files); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unknown choice %q", mode)
+	}
+
+	if e.Tier != 1 {
+		fmt.Printf("\nif the source is sound: smith promote %s@%s  (interactive)\n", e.Name, e.Version)
+	}
+	return nil
+}
+
+// provenanceFor returns log entries mentioning a tool@version, oldest first,
+// across every per-machine log.
+func provenanceFor(p config.Paths, name, version string) []provenance.Entry {
+	var out []provenance.Entry
+	logs, _ := filepath.Glob(filepath.Join(filepath.Dir(p.ProvenanceLog), "*.jsonl"))
+	for _, lg := range logs {
+		raw, err := os.ReadFile(lg)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var pe provenance.Entry
+			if json.Unmarshal([]byte(line), &pe) != nil {
+				continue
+			}
+			if pe.Tool == name && (pe.Version == version || pe.Version == "") {
+				out = append(out, pe)
+			}
+		}
+	}
+	return out
+}
+
+// bundleFiles lists the regular files in a tool's store dir, relative paths.
+func bundleFiles(base string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, rerr := filepath.Rel(base, path)
+		if rerr != nil {
+			return rerr
+		}
+		out = append(out, rel)
+		return nil
+	})
+	return out, err
+}
+
+// printInline dumps each text file with a header; binary files are noted, not
+// printed (an external Tier-2 binary is not human-readable).
+func printInline(base string, files []string) error {
+	for _, f := range files {
+		full := filepath.Join(base, f)
+		data, err := os.ReadFile(full)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("\n===== %s =====\n", f)
+		if isBinary(data) {
+			sum, _ := store.HashFile(full)
+			fmt.Printf("(binary, %d bytes, sha256=%s — inspect with your own tools)\n", len(data), sum)
+			continue
+		}
+		os.Stdout.Write(data)
+		if len(data) > 0 && data[len(data)-1] != '\n' {
+			fmt.Println()
+		}
+	}
+	return nil
+}
+
+func isBinary(data []byte) bool {
+	n := len(data)
+	if n > 8000 {
+		n = 8000
+	}
+	for i := 0; i < n; i++ {
+		if data[i] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// openInEditor opens the bundle files in $VISUAL/$EDITOR. It never guesses an
+// editor: with neither set it prints the paths so the operator opens them in
+// whatever they use.
+func openInEditor(base string, files []string) error {
+	ed := os.Getenv("VISUAL")
+	if ed == "" {
+		ed = os.Getenv("EDITOR")
+	}
+	full := make([]string, len(files))
+	for i, f := range files {
+		full[i] = filepath.Join(base, f)
+	}
+	if ed == "" {
+		fmt.Fprintln(os.Stderr, "[smith] $VISUAL/$EDITOR not set — open these paths in your editor:")
+		for _, f := range full {
+			fmt.Println(f)
+		}
+		return nil
+	}
+	fields := strings.Fields(ed) // allow "code --wait" etc.
+	argv := append(fields[1:], full...)
+	cmd := exec.Command(fields[0], argv...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
 // ---------------------------------------------------------------- promote
 
 func cmdPromote(p config.Paths, args []string) error {
@@ -708,7 +950,8 @@ func cmdPromote(p config.Paths, args []string) error {
 	for _, a := range e.Artifacts {
 		fmt.Printf("  %s  sha256=%s\n", a.Path, a.Sha256)
 	}
-	fmt.Println("\nReview means reading the tool source / provenance — a passing self-test is not sufficient (§7).")
+	fmt.Printf("\nReview means reading the tool source / provenance — a passing self-test is not sufficient (§7).\n")
+	fmt.Printf("If you haven't: run `smith review %s@%s` in another shell first.\n", e.Name, e.Version)
 
 	rd := bufio.NewReader(os.Stdin)
 	fmt.Print("Reviewer name: ")
