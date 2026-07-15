@@ -25,6 +25,7 @@ import (
 	"smith/internal/index"
 	"smith/internal/misex"
 	"smith/internal/provenance"
+	"smith/internal/reviewtui"
 	"smith/internal/sandbox"
 	"smith/internal/scaffold"
 	"smith/internal/sign"
@@ -97,7 +98,7 @@ Usage:
   smith list [--json]               list tools with version, tier, origin
   smith status [--json]             alias of list
   smith run <name>[@<ver>] [args]   run a tool (Tier 0/2 forced into sandbox)
-  smith review <name>[@<ver>] [--inline|--edit|--paths] [--editor <cmd>]   read a tool's source before promoting
+  smith review <name>[@<ver>] [--plain|--edit|--paths] [--editor <cmd>]   interactive source review (TUI); comment lines -> agent report
   smith promote <name>[@<ver>]      human-gated: quarantine -> trusted (Tier 1, on PATH)
   smith demote <name>[@<ver>] --reason <why>   trusted -> quarantine, off PATH now
   smith verify [--json]             re-check sha256 pins + provenance chain + PATH hygiene
@@ -686,7 +687,8 @@ func pickArtifact(e index.Entry, name string) (index.Artifact, error) {
 // Read-only; it never changes tiers.
 func cmdReview(p config.Paths, args []string) error {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
-	inline := fs.Bool("inline", false, "print the source to stdout")
+	inline := fs.Bool("inline", false, "force the interactive viewer (default on a TTY)")
+	plain := fs.Bool("plain", false, "dump source to stdout (no TUI); default when piped")
 	edit := fs.Bool("edit", false, "open the bundle in an editor")
 	editor := fs.String("editor", "", "editor command to use (overrides $VISUAL/$EDITOR/config); implies --edit")
 	paths := fs.Bool("paths", false, "print file paths only")
@@ -701,7 +703,7 @@ func cmdReview(p config.Paths, args []string) error {
 		spec = fs.Arg(0)
 	}
 	if spec == "" {
-		return fmt.Errorf("usage: smith review <name>[@<version>] [--inline|--edit|--paths]")
+		return fmt.Errorf("usage: smith review <name>[@<version>] [--plain|--edit|--paths] [--editor <cmd>]")
 	}
 	name, version := splitSpec(spec)
 	e, err := index.Resolve(p.IndexTools, name, version)
@@ -783,45 +785,98 @@ func cmdReview(p config.Paths, args []string) error {
 		}
 	}
 
-	// Pick a mode. Explicit flags win; otherwise prompt on a TTY, else print
-	// inline (composable / agent-readable).
+	// Pick a mode. Explicit flags win. Default is the interactive TUI on a
+	// real terminal; piped/non-TTY falls back to a plain dump so
+	// `smith review x | less` and agents still work.
+	tty := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	mode := ""
 	switch {
 	case *edit || *editor != "":
-		mode = "e"
+		mode = "edit"
 	case *paths:
-		mode = "p"
-	case *inline:
-		mode = "i"
-	case term.IsTerminal(int(os.Stdin.Fd())):
-		fmt.Print("\nreview: [i]nline  [e]ditor  [p]aths  [q]uit > ")
-		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-		mode = strings.TrimSpace(strings.ToLower(line))
+		mode = "paths"
+	case *plain:
+		mode = "plain"
+	case *inline || tty:
+		mode = "tui"
 	default:
-		mode = "i"
+		mode = "plain"
+	}
+	if mode == "tui" && !tty {
+		mode = "plain" // can't drive a TUI without a terminal
 	}
 
 	switch mode {
-	case "q", "":
-		return nil
-	case "p":
+	case "paths":
 		for _, f := range files {
 			fmt.Println(filepath.Join(base, f))
 		}
-	case "e":
+	case "edit":
 		return openInEditor(ed, base, files)
-	case "i":
+	case "plain":
 		if err := printInline(base, files); err != nil {
 			return err
 		}
-	default:
-		return fmt.Errorf("unknown choice %q", mode)
+	case "tui":
+		if err := runReviewTUI(e, base, files, fc); err != nil {
+			return err
+		}
 	}
 
 	if e.Tier != 1 {
 		fmt.Printf("\nif the source is sound: smith promote %s@%s  (interactive)\n", e.Name, e.Version)
 	}
 	return nil
+}
+
+// runReviewTUI loads the bundle into the interactive reviewer and prints the
+// resulting comment report (agent-pasteable) on exit.
+func runReviewTUI(e index.Entry, base string, files []string, fc config.FileConfig) error {
+	rf, err := loadReviewFiles(base, files)
+	if err != nil {
+		return err
+	}
+	theme := reviewtui.ThemeByName(fc.Review.Theme)
+	if fc.Review.Color == "never" {
+		theme = reviewtui.ThemeByName("mono")
+	}
+	m := reviewtui.New(e.Name, e.Version, rf)
+	if err := reviewtui.RunTerminal(m, theme); err != nil {
+		return err
+	}
+	if report := m.Report(); report != "" {
+		fmt.Print("\n" + report)
+		fmt.Fprintf(os.Stderr, "\n[smith] %d comment(s) above — paste to the tool's author.\n", len(m.Comments))
+	} else {
+		fmt.Fprintln(os.Stderr, "[smith] no comments recorded.")
+	}
+	return nil
+}
+
+// loadReviewFiles reads a bundle into reviewer files: text is split into
+// lines with a detected language; binary artifacts become a single note line
+// (they are not human-readable in a source view).
+func loadReviewFiles(base string, files []string) ([]reviewtui.File, error) {
+	var rf []reviewtui.File
+	for _, rel := range files {
+		data, err := os.ReadFile(filepath.Join(base, rel))
+		if err != nil {
+			return nil, err
+		}
+		if isBinary(data) {
+			sum, _ := store.HashFile(filepath.Join(base, rel))
+			rf = append(rf, reviewtui.File{Name: rel, Lang: "generic",
+				Lines: []string{fmt.Sprintf("(binary file, %d bytes, sha256=%s)", len(data), sum)}})
+			continue
+		}
+		lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		first := ""
+		if len(lines) > 0 {
+			first = lines[0]
+		}
+		rf = append(rf, reviewtui.File{Name: rel, Lang: reviewtui.LangFor(rel, first), Lines: lines})
+	}
+	return rf, nil
 }
 
 // provenanceFor returns log entries mentioning a tool@version, oldest first,

@@ -67,6 +67,13 @@ type FileConfig struct {
 	// Editor is a persistent fallback for `smith review --edit` when neither
 	// $VISUAL nor $EDITOR is exported (e.g. "nano", "code --wait").
 	Editor string `yaml:"editor,omitempty"`
+	// Review configures the interactive reviewer.
+	Review ReviewConfig `yaml:"review,omitempty"`
+}
+
+type ReviewConfig struct {
+	Theme string `yaml:"theme,omitempty"` // dark | light | mono
+	Color string `yaml:"color,omitempty"` // auto | always | never
 }
 
 func (p Paths) LoadFileConfig() (FileConfig, error) {
