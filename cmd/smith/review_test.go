@@ -27,6 +27,23 @@ func TestReviewHelpers(t *testing.T) {
 	}
 }
 
+func TestOrderForReviewSourceFirst(t *testing.T) {
+	e := index.Entry{
+		Artifacts: []index.Artifact{{Path: "bin/calc"}},
+		Docs: []index.Artifact{
+			{Path: "SKILL.md"}, {Path: "manifest.yaml"}, {Path: "bin/selftest.sh"},
+		},
+	}
+	// Deliberately shuffled input (as WalkDir alphabetical would give).
+	got := orderForReview(e, []string{"SKILL.md", "bin/calc", "bin/selftest.sh", "manifest.yaml"})
+	want := []string{"bin/calc", "bin/selftest.sh", "SKILL.md", "manifest.yaml"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestReviewRunsAndOpenEditorFallsBack(t *testing.T) {
 	p := testPaths(t)
 	fakeTool(t, p, "widget", "1.0.0")

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -762,10 +763,11 @@ func cmdReview(p config.Paths, args []string) error {
 		}
 	}
 
-	files, err := bundleFiles(base)
+	all, err := bundleFiles(base)
 	if err != nil {
 		return err
 	}
+	files := orderForReview(e, all) // source (executables) first, docs last
 	fmt.Printf("\nbundle (%d files) in %s:\n", len(files), base)
 	for _, f := range files {
 		fmt.Printf("  %s\n", f)
@@ -848,6 +850,42 @@ func provenanceFor(p config.Paths, name, version string) []provenance.Entry {
 	return out
 }
 
+// orderForReview sorts bundle files source-first: executables (the entry
+// point and any other artifacts) before docs (SKILL.md, selftest, manifest),
+// so the reviewer reads what actually runs before the metadata. Any file not
+// classified by the index entry is appended last.
+func orderForReview(e index.Entry, all []string) []string {
+	rank := map[string]int{}
+	for _, a := range e.Artifacts {
+		rank[a.Path] = 0
+	}
+	for _, d := range e.Docs {
+		if _, ok := rank[d.Path]; !ok {
+			if strings.HasPrefix(d.Path, "bin/") {
+				rank[d.Path] = 1 // executable docs (e.g. selftest.sh) — still code
+			} else {
+				rank[d.Path] = 2 // metadata (SKILL.md, manifest.yaml)
+			}
+		}
+	}
+	ordered := append([]string(nil), all...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		ri, oki := rank[ordered[i]]
+		rj, okj := rank[ordered[j]]
+		if !oki {
+			ri = 3
+		}
+		if !okj {
+			rj = 3
+		}
+		if ri != rj {
+			return ri < rj
+		}
+		return ordered[i] < ordered[j]
+	})
+	return ordered
+}
+
 // bundleFiles lists the regular files in a tool's store dir, relative paths.
 func bundleFiles(base string) ([]string, error) {
 	var out []string
@@ -920,11 +958,22 @@ func openInEditor(ed, base string, files []string) error {
 		}
 		return nil
 	}
+	// Open each file in its own editor session, advancing when you close it.
+	// This works identically across editors — terminal editors (nano/vim)
+	// would otherwise load extra files as hidden buffers you never see, and
+	// exiting closes them all; sequential sessions make every file reviewable
+	// no matter the editor.
 	fields := strings.Fields(ed) // allow "code --wait" etc.
-	argv := append(fields[1:], full...)
-	cmd := exec.Command(fields[0], argv...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
+	for i, f := range full {
+		fmt.Fprintf(os.Stderr, "[smith] [%d/%d] %s — close the editor to continue\n", i+1, len(full), files[i])
+		argv := append(append([]string(nil), fields[1:]...), f)
+		cmd := exec.Command(fields[0], argv...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("editor %q on %s: %w", ed, files[i], err)
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------- promote
