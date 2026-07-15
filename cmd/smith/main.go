@@ -68,6 +68,8 @@ func main() {
 		err = cmdRegister(paths, args)
 	case "publish":
 		err = cmdPublish(paths, args)
+	case "key":
+		err = cmdKey(paths, args)
 	case "fetch":
 		err = cmdFetch(paths, args)
 	case "sync":
@@ -109,6 +111,7 @@ Usage:
   smith upgrade <name> [--version X]   new version: authored -> seed a draft from the trusted source; external -> add newer
   smith register <name>             sandbox-run the draft's self-test; pass -> Tier 0 + promotion request
   smith publish                     sign the manifest set + commit/push the index repo
+  smith key list|rotate|add <pub>|revoke <fprint>   manage signing keys (multi-key + rotation)
   smith fetch <name>[@<ver>]        install a tool on this machine from the index (checksum + signature verified)
   smith sync                        pull the index repo + reconcile: tools demoted upstream come off PATH now
   smith gc [--older-than 30d] [--yes]  remove unpromoted Tier 0 versions + stale drafts (dry-run unless --yes)
@@ -1570,6 +1573,113 @@ func cmdPublish(p config.Paths, args []string) error {
 	} else {
 		fmt.Println("index committed (no git remote configured — add one to sync machines)")
 	}
+	return nil
+}
+
+// cmdKey manages the signing trust set: list authorized keys, rotate the
+// local key (old stays valid through the window), authorize another machine's
+// key, or revoke one. Mutations re-sign and commit the index.
+func cmdKey(p config.Paths, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: smith key list|rotate|add <pubkey|file> [label]|revoke <fingerprint>")
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	switch sub {
+	case "list":
+		keys, err := sign.LoadAuthorizedKeys(p.Home)
+		if err != nil {
+			return err
+		}
+		if len(keys) == 0 {
+			fmt.Println("no authorized keys yet (nothing published)")
+			return nil
+		}
+		var localFP string
+		if pub, err := sign.LoadPublicKey(p.Home); err == nil {
+			localFP = sign.Fingerprint(pub)
+		}
+		fmt.Printf("%-18s %-10s %s\n", "FINGERPRINT", "LOCAL", "LABEL")
+		for _, k := range keys {
+			local := ""
+			if k.Fingerprint() == localFP {
+				local = "yes (has key)"
+			}
+			fmt.Printf("%-18s %-10s %s\n", k.Fingerprint(), local, k.Label)
+		}
+		return nil
+
+	case "rotate":
+		fp, err := sign.Rotate(p.Home)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("rotated: new signing key %s (previous key kept authorized for the window)\n", fp)
+		return resignAndCommit(p, "smith key rotate "+fp)
+
+	case "add":
+		if len(rest) < 1 {
+			return fmt.Errorf("usage: smith key add <hex-pubkey|file> [label]")
+		}
+		pub, err := sign.ParsePublicKeyArg(rest[0])
+		if err != nil {
+			return err
+		}
+		label := "added"
+		if len(rest) > 1 {
+			label = strings.Join(rest[1:], " ")
+		}
+		if err := sign.AddAuthorizedKey(p.Home, pub, label); err != nil {
+			return err
+		}
+		fmt.Printf("authorized key %s (%s)\n", sign.Fingerprint(pub), label)
+		return resignAndCommit(p, "smith key add "+sign.Fingerprint(pub))
+
+	case "revoke":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: smith key revoke <fingerprint>")
+		}
+		n, err := sign.RevokeAuthorizedKey(p.Home, rest[0])
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("no authorized key with fingerprint %s", rest[0])
+		}
+		fmt.Printf("revoked %d key(s) with fingerprint %s\n", n, rest[0])
+		return resignAndCommit(p, "smith key revoke "+rest[0])
+
+	default:
+		return fmt.Errorf("unknown key subcommand %q (list|rotate|add|revoke)", sub)
+	}
+}
+
+// resignAndCommit re-signs the index with the current key and commits the
+// trust-set change so other machines pick it up.
+func resignAndCommit(p config.Paths, msg string) error {
+	if _, err := sign.SignIndex(p.Home, p.IndexTools, nowUTC()); err != nil {
+		return err
+	}
+	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
+		Event: "key", Actor: config.Actor(), Reason: msg,
+	}); err != nil {
+		return err
+	}
+	if out, _ := gitOutput(p, "remote"); strings.TrimSpace(out) == "" {
+		fmt.Println("(no git remote — commit/push the index to sync the trust set)")
+		return nil
+	}
+	if err := gitInHome(p, "add", "index", "provenance"); err != nil {
+		return err
+	}
+	if err := gitInHome(p, "commit", "-m", msg); err != nil {
+		return err
+	}
+	if err := gitInHome(p, "push", "-u", "origin", "HEAD"); err != nil {
+		return fmt.Errorf("committed locally but push failed: %w", err)
+	}
+	fmt.Println("trust set re-signed and pushed")
 	return nil
 }
 
