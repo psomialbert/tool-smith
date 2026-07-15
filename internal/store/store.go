@@ -8,6 +8,7 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -78,6 +79,43 @@ func copyFile(src, dst string, perm fs.FileMode) error {
 		return err
 	}
 	return out.Close()
+}
+
+// pinsFile is the per-machine record of an external tool's extracted-binary
+// hashes, kept inside the (git-ignored) store rather than the signed index,
+// because external bytes differ per platform and a fetch-only machine may not
+// hold the signing key. Its authenticity chains back to the archive checksum
+// verified against the signed mise.lock at fetch time.
+const pinsFile = ".smithpins.json"
+
+type LocalPin struct {
+	Path   string `json:"path"`
+	Sha256 string `json:"sha256"`
+}
+
+func WritePins(versionDir string, pins []LocalPin) error {
+	if err := os.MkdirAll(versionDir, 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(pins, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(versionDir, pinsFile), append(raw, '\n'), 0o644)
+}
+
+// ReadPins returns the local pins for a version dir, or (nil, false) if none
+// were recorded (e.g. the tool was added natively with index pins instead).
+func ReadPins(versionDir string) ([]LocalPin, bool) {
+	raw, err := os.ReadFile(filepath.Join(versionDir, pinsFile))
+	if err != nil {
+		return nil, false
+	}
+	var pins []LocalPin
+	if json.Unmarshal(raw, &pins) != nil {
+		return nil, false
+	}
+	return pins, true
 }
 
 // Move relocates a tool's version dir between quarantine and trusted.

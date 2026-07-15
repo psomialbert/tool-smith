@@ -53,8 +53,14 @@ type Entry struct {
 	Docs      []Artifact `yaml:"docs,omitempty" json:"docs,omitempty"` // pinned non-executables (SKILL.md, selftest, manifest)
 	Blob      *Blob      `yaml:"blob,omitempty" json:"blob,omitempty"` // authored tools: shared-transport archive
 	// Verification is the strongest check the source passed at add time:
-	// gh-attestation | aqua-registry | tofu (see internal/attest).
+	// gh-attestation | aqua-registry | mise-checksum | tofu (see internal/attest).
 	Verification string `yaml:"verification,omitempty" json:"verification,omitempty"`
+	// Locked marks an external tool whose cross-machine integrity anchor is
+	// the committed mise.lock (archive checksums), not per-platform index
+	// pins. A Locked entry with no Artifacts is a stub: the tool is approved
+	// for this platform but not yet materialized here — `smith fetch` installs
+	// it via the lockfile and records local pins in the store.
+	Locked bool `yaml:"locked,omitempty" json:"locked,omitempty"`
 }
 
 func entryPath(indexTools, name, version, platform string) string {

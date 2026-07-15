@@ -88,6 +88,43 @@ func Lock(spec, lockPath string, platforms []string) error {
 	return os.WriteFile(lockPath, raw, 0o644)
 }
 
+// InstallLocked installs spec inside a throwaway project seeded with the
+// committed lockfile, so mise verifies the download against the recorded
+// checksum for this machine's platform (the signed cross-machine anchor).
+func InstallLocked(spec, lockPath string) error {
+	name, _, _ := strings.Cut(spec, "@")
+	ver := ""
+	if i := strings.Index(spec, "@"); i >= 0 {
+		ver = spec[i+1:]
+	}
+	work, err := os.MkdirTemp("", "smith-locked-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work)
+	lock, err := os.ReadFile(lockPath)
+	if err != nil {
+		return fmt.Errorf("reading committed lockfile: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "mise.lock"), lock, 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(work, "mise.toml"),
+		[]byte(fmt.Sprintf("[tools]\n%q = %q\n", name, ver)), 0o644); err != nil {
+		return err
+	}
+	trust := exec.Command("mise", "trust")
+	trust.Dir = work
+	trust.Stdout, trust.Stderr = os.Stderr, os.Stderr
+	_ = trust.Run()
+
+	cmd := exec.Command("mise", "install")
+	cmd.Dir = work
+	cmd.Env = append(os.Environ(), "MISE_ALWAYS_KEEP_DOWNLOAD=1", "MISE_LOCKED_VERIFY_PROVENANCE=1")
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	return cmd.Run()
+}
+
 // Registry returns the primary backend spec for a short tool name, e.g.
 // "aqua:cli/cli" for gh. Empty when unknown.
 func Registry(name string) string {

@@ -26,7 +26,8 @@ the decisions taken.
 | `smith add` hardening | ✅ Phase 3: verification level decided before any download — `gh-attestation` (SLSA provenance verified over the exact downloaded archive) > `aqua-registry` (curated checksums via mise) > `tofu` (refused unless `--allow-unverified`); level recorded in index + provenance and shown at promotion review |
 | `smith sync` | ✅ v0.2: `git pull` the index + reconcile — tools demoted/removed upstream come off PATH and into quarantine immediately (provenance-logged); uninstalled Tier 1 entries reported as fetch candidates. Propagates revocation across machines |
 | `smith gc` | ✅ v0.2: dry-run by default; `--older-than 30d --yes` removes only unpromoted Tier 0 versions past the cutoff + unregistered drafts; never touches Tier 1/2 |
-| `smith add` cross-platform pins | ✅ v0.3: generates a per-tool `mise.lock` (checksums for the platforms in `config.yaml` `platforms:`), now part of the signed index digest; checksum-bearing backends (`ubi`/`github`/`gitlab`/`http`) graduate from TOFU-refusal to `mise-checksum` |
+| `smith add` cross-platform pins | ✅ v0.3: generates a per-tool `mise.lock` (checksums for the platforms in `config.yaml` `platforms:`), now part of the signed index digest; checksum-bearing backends (`ubi`/`github`/`gitlab`/`http`) graduate from TOFU-refusal to `mise-checksum`. Also publishes metadata-only stubs for the other platforms |
+| `smith fetch` (external, cross-platform) | ✅ v0.3: materializes a stubbed external on a fresh platform via the committed `mise.lock` (checksum-verified), recording extracted-binary hashes as **local pins** in the git-ignored store. Fetch-only machines never touch the signed index, so its signature stays valid; `run`/`verify` check index pins when present, else local pins |
 
 Two-machine acceptance is verified against a real Linux environment via
 `scripts/linux-e2e.sh` (privileged ubuntu container): clones the live GitHub

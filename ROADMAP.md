@@ -71,18 +71,17 @@ Versions are themes, not promises; order within a release is by risk.
   refuse-by-default to `mise-checksum` level; `aqua` stays `aqua-registry`;
   version-only backends (`asdf`/`cargo`/`go`/`npm`/`pipx`/`vfox`) remain
   TOFU, refused unless `--allow-unverified`. Policy is `attest.Allowed()`.
-- **Still open — cross-platform external *fetch*.** The signed lockfile now
-  *carries* other platforms' checksums, but `smith fetch` doesn't yet
-  consume them: machine B still can't materialize a darwin-added external on
-  linux without its own `smith add`. Wiring fetch to install-via-lockfile +
-  verify is next. **Design note discovered while building:** externals have
-  different bytes per platform, so B must compute its own extracted-binary
-  pin — but that pin lives in the shared, signed index file. Storing a
-  machine-computed pin into a signed shared entry diverges from what the
-  signer produced. The fix is to have the *archive* checksum (deterministic,
-  in mise.lock, signed) be the cross-machine integrity anchor, and treat the
-  per-machine extracted pin as local-only state that `run` checks. That
-  separation is the real Phase-2-of-v0.3 work, not a quick wire-up.
+- ~~**Cross-platform external *fetch*.**~~ **Shipped**: `smith add` publishes
+  metadata-only **stubs** for the other configured platforms (mise→GOOS-GOARCH
+  mapping), so a fetch-only machine finds the tool. `smith fetch` installs an
+  external stub via the committed `mise.lock` (`mise install` verifies the
+  download against the signed per-platform checksum), then records the
+  extracted-binary hashes as **local pins** in the git-ignored store —
+  resolving the integrity tension: the *archive* checksum in the signed
+  lockfile is the cross-machine anchor, the per-machine extracted pin is
+  local-only state that `run`/`verify` check. A fetch-only machine never
+  writes the signed index, so its signature stays valid. Verified end-to-end
+  in a Linux/arm64 container against a macOS-authored index.
 - Delegate attestation more deeply to mise's provenance verification (read
   the `provenance` field mise records in the lockfile) — still open; today
   we record backend class + our own `gh attestation verify`.

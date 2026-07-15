@@ -129,6 +129,28 @@ func splitSpec(s string) (name, version string) {
 	return s, ""
 }
 
+// miseToGoPlatform maps a mise platform name (config `platforms:`, e.g.
+// "macos-arm64", "linux-x64") to smith's index platform key (GOOS-GOARCH,
+// e.g. "darwin-arm64", "linux-amd64"), so stub entries land where a fetching
+// machine's index.CurrentPlatform() will look for them.
+func miseToGoPlatform(mp string) string {
+	os_, arch, ok := strings.Cut(mp, "-")
+	if !ok {
+		return mp
+	}
+	switch os_ {
+	case "macos":
+		os_ = "darwin"
+	}
+	switch arch {
+	case "x64", "x86_64", "amd64":
+		arch = "amd64"
+	case "aarch64":
+		arch = "arm64"
+	}
+	return os_ + "-" + arch
+}
+
 // ---------------------------------------------------------------- init
 
 func cmdInit(p config.Paths, args []string) error {
@@ -352,6 +374,34 @@ func cmdAdd(p config.Paths, args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "[smith] locked checksums for: %s (index/tools/%s/%s/mise.lock)\n",
 			strings.Join(plats, ", "), name, version)
+		// Mark this entry locked and publish metadata-only stubs for the
+		// other configured platforms, so a fetch-only machine on any of them
+		// can find and materialize the tool from the signed lockfile.
+		e.Locked = true
+		if err := index.Save(p.IndexTools, e); err != nil {
+			return err
+		}
+		cur := index.CurrentPlatform()
+		var stubbed []string
+		for _, mp := range fc.Platforms {
+			gp := miseToGoPlatform(mp)
+			if gp == cur {
+				continue
+			}
+			stub := index.Entry{
+				Name: name, Version: version, Platform: gp, Tier: 2,
+				Origin: "external", Source: "mise:" + spec,
+				AddedAt: e.AddedAt, Verification: verification, Locked: true,
+			}
+			if err := index.Save(p.IndexTools, stub); err != nil {
+				return err
+			}
+			stubbed = append(stubbed, gp)
+		}
+		if len(stubbed) > 0 {
+			fmt.Fprintf(os.Stderr, "[smith] cross-platform stubs: %s (fetchable via `smith fetch %s` there)\n",
+				strings.Join(stubbed, ", "), name)
+		}
 	}
 
 	fmt.Printf("added %s at Tier 2 (external quarantine)\n", spec)
@@ -627,7 +677,7 @@ func cmdRun(p config.Paths, args []string) error {
 	} else {
 		base = store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
 	}
-	art, err := pickArtifact(e, name)
+	art, err := pickArtifact(effectiveArtifacts(e, base), name, e.Name+"@"+e.Version)
 	if err != nil {
 		return err
 	}
@@ -660,23 +710,41 @@ func cmdRun(p config.Paths, args []string) error {
 	return syscall.Exec(exe, argv, env)
 }
 
-func pickArtifact(e index.Entry, name string) (index.Artifact, error) {
-	if len(e.Artifacts) == 0 {
-		return index.Artifact{}, fmt.Errorf("index entry %s@%s has no artifacts", e.Name, e.Version)
+// effectiveArtifacts returns the files to integrity-check for a tool: the
+// signed index pins when present (authored tools, plus the native-add
+// platform of an external), otherwise the local pins recorded in the store
+// at fetch time (an external materialized here from the signed mise.lock).
+func effectiveArtifacts(e index.Entry, base string) []index.Artifact {
+	if len(e.Artifacts) > 0 {
+		return e.Artifacts
 	}
-	for _, a := range e.Artifacts {
+	if pins, ok := store.ReadPins(base); ok {
+		out := make([]index.Artifact, len(pins))
+		for i, pn := range pins {
+			out[i] = index.Artifact{Path: pn.Path, Sha256: pn.Sha256}
+		}
+		return out
+	}
+	return nil
+}
+
+func pickArtifact(arts []index.Artifact, name, spec string) (index.Artifact, error) {
+	if len(arts) == 0 {
+		return index.Artifact{}, fmt.Errorf("%s is not materialized here — run `smith fetch %s`", spec, name)
+	}
+	for _, a := range arts {
 		if filepath.Base(a.Path) == name {
 			return a, nil
 		}
 	}
-	if len(e.Artifacts) == 1 {
-		return e.Artifacts[0], nil
+	if len(arts) == 1 {
+		return arts[0], nil
 	}
 	var names []string
-	for _, a := range e.Artifacts {
+	for _, a := range arts {
 		names = append(names, filepath.Base(a.Path))
 	}
-	return index.Artifact{}, fmt.Errorf("%s@%s ships several binaries (%s); run one by its own name", e.Name, e.Version, strings.Join(names, ", "))
+	return index.Artifact{}, fmt.Errorf("%s ships several binaries (%s); run one by its own name", spec, strings.Join(names, ", "))
 }
 
 // ---------------------------------------------------------------- review
@@ -728,7 +796,7 @@ func cmdReview(p config.Paths, args []string) error {
 	// Integrity: the bytes you're about to read must match the pins, or the
 	// review is meaningless.
 	fmt.Println("\nintegrity (pinned bytes vs on-disk):")
-	allPinned := append(append([]index.Artifact{}, e.Artifacts...), e.Docs...)
+	allPinned := append(append([]index.Artifact{}, effectiveArtifacts(e, base)...), e.Docs...)
 	drift := false
 	for _, a := range allPinned {
 		sum, herr := store.HashFile(filepath.Join(base, a.Path))
@@ -1362,7 +1430,16 @@ func cmdFetch(p config.Paths, args []string) error {
 		}
 	case strings.HasPrefix(e.Source, "mise:"):
 		spec := strings.TrimPrefix(e.Source, "mise:")
-		if err := misex.Install(spec); err != nil {
+		// Install via the committed lockfile so mise verifies the download
+		// against the signed per-platform checksum — the cross-machine
+		// integrity anchor for externals. Fall back to a plain install only
+		// if no lockfile was published.
+		lockPath := filepath.Join(p.IndexTools, e.Name, e.Version, "mise.lock")
+		if _, statErr := os.Stat(lockPath); statErr == nil {
+			if err := misex.InstallLocked(spec, lockPath); err != nil {
+				return fmt.Errorf("locked install failed (checksum mismatch or unavailable): %w", err)
+			}
+		} else if err := misex.Install(spec); err != nil {
 			return err
 		}
 		binDirs, err := misex.BinPaths(spec)
@@ -1373,10 +1450,28 @@ func cmdFetch(p config.Paths, args []string) error {
 		if !trustable {
 			dst = store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
 		}
+		var names []string
 		for _, d := range binDirs {
-			if _, err := store.CopyExecutables(d, filepath.Join(dst, "bin")); err != nil {
+			copied, err := store.CopyExecutables(d, filepath.Join(dst, "bin"))
+			if err != nil {
 				return err
 			}
+			names = append(names, copied...)
+		}
+		// Record local pins (per-machine, in the git-ignored store) since an
+		// external's extracted bytes are platform-specific and this machine
+		// may not hold the signing key to update the shared index.
+		var pins []store.LocalPin
+		for _, n := range names {
+			rel := filepath.Join("bin", n)
+			sum, herr := store.HashFile(filepath.Join(dst, rel))
+			if herr != nil {
+				return herr
+			}
+			pins = append(pins, store.LocalPin{Path: rel, Sha256: sum})
+		}
+		if err := store.WritePins(dst, pins); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("entry %s@%s has no fetchable source (%s)", e.Name, e.Version, e.Source)
@@ -1674,7 +1769,13 @@ func cmdVerify(p config.Paths, args []string) error {
 		if e.Tier == 1 {
 			base = store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
 		}
-		for _, a := range append(append([]index.Artifact{}, e.Artifacts...), e.Docs...) {
+		// A Locked external stub not yet materialized here has no local
+		// pins — nothing to check until `smith fetch`.
+		checkSet := append(append([]index.Artifact{}, effectiveArtifacts(e, base)...), e.Docs...)
+		if len(checkSet) == 0 && e.Locked {
+			add(verifyResult{Tool: e.Name, Version: e.Version, Check: "not-fetched", OK: true, Detail: "locked stub; fetch to materialize"})
+		}
+		for _, a := range checkSet {
 			path := filepath.Join(base, a.Path)
 			sum, err := store.HashFile(path)
 			switch {
