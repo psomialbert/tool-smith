@@ -13,7 +13,7 @@ the decisions taken.
 | `smith add <name>[@ver]` | ✅ resolves/installs via mise (aqua backend checksums apply), lands at Tier 2 quarantine, sha256-pins each artifact |
 | `smith list` / `status` | ✅ `--json` for the machine path |
 | `smith run <name> [args]` | ✅ re-verifies the sha256 pin **before every execution**; Tier 0/2 forced into sandbox, refuses to run if no sandbox mechanism exists |
-| `smith review <name>` | ✅ the pre-promotion read: re-checks on-disk bytes vs pins, shows provenance + bundle, and displays source **inline** / in `$VISUAL`/`$EDITOR` / as **paths** (never guesses an editor). Read-only |
+| `smith review <name>` | ✅ the pre-promotion read: re-checks on-disk bytes vs pins, shows provenance + bundle, and displays source **inline** / in an editor / as **paths** (never guesses an editor). Editor resolves `--editor <cmd>` → `$VISUAL` → `$EDITOR` (must be **exported**) → `config.yaml` `editor:`, else prints paths. Read-only |
 | `smith promote` | ✅ minimal: interactive-TTY-gated review → moves quarantine→trusted, symlinks onto PATH, provenance records reviewer |
 | `smith demote <spec> --reason` | ✅ off PATH immediately, back to quarantine, reason recorded |
 | `smith verify` | ✅ provenance hash-chain + all sha256 pins + PATH hygiene + trusted-bin symlink containment |

@@ -96,7 +96,7 @@ Usage:
   smith list [--json]               list tools with version, tier, origin
   smith status [--json]             alias of list
   smith run <name>[@<ver>] [args]   run a tool (Tier 0/2 forced into sandbox)
-  smith review <name>[@<ver>] [--inline|--edit|--paths]   read a tool's source before promoting
+  smith review <name>[@<ver>] [--inline|--edit|--paths] [--editor <cmd>]   read a tool's source before promoting
   smith promote <name>[@<ver>]      human-gated: quarantine -> trusted (Tier 1, on PATH)
   smith demote <name>[@<ver>] --reason <why>   trusted -> quarantine, off PATH now
   smith verify [--json]             re-check sha256 pins + provenance chain + PATH hygiene
@@ -686,7 +686,8 @@ func pickArtifact(e index.Entry, name string) (index.Artifact, error) {
 func cmdReview(p config.Paths, args []string) error {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	inline := fs.Bool("inline", false, "print the source to stdout")
-	edit := fs.Bool("edit", false, "open the bundle in $VISUAL/$EDITOR")
+	edit := fs.Bool("edit", false, "open the bundle in an editor")
+	editor := fs.String("editor", "", "editor command to use (overrides $VISUAL/$EDITOR/config); implies --edit")
 	paths := fs.Bool("paths", false, "print file paths only")
 	var spec string
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -770,11 +771,21 @@ func cmdReview(p config.Paths, args []string) error {
 		fmt.Printf("  %s\n", f)
 	}
 
+	// Resolve the editor once: --editor flag > $VISUAL > $EDITOR >
+	// config.yaml editor. Env must be *exported* to be visible here.
+	fc, _ := p.LoadFileConfig()
+	ed := *editor
+	for _, cand := range []string{os.Getenv("VISUAL"), os.Getenv("EDITOR"), fc.Editor} {
+		if ed == "" {
+			ed = cand
+		}
+	}
+
 	// Pick a mode. Explicit flags win; otherwise prompt on a TTY, else print
 	// inline (composable / agent-readable).
 	mode := ""
 	switch {
-	case *edit:
+	case *edit || *editor != "":
 		mode = "e"
 	case *paths:
 		mode = "p"
@@ -796,7 +807,7 @@ func cmdReview(p config.Paths, args []string) error {
 			fmt.Println(filepath.Join(base, f))
 		}
 	case "e":
-		return openInEditor(base, files)
+		return openInEditor(ed, base, files)
 	case "i":
 		if err := printInline(base, files); err != nil {
 			return err
@@ -890,20 +901,20 @@ func isBinary(data []byte) bool {
 	return false
 }
 
-// openInEditor opens the bundle files in $VISUAL/$EDITOR. It never guesses an
-// editor: with neither set it prints the paths so the operator opens them in
-// whatever they use.
-func openInEditor(base string, files []string) error {
-	ed := os.Getenv("VISUAL")
-	if ed == "" {
-		ed = os.Getenv("EDITOR")
-	}
+// openInEditor opens the bundle files with the resolved editor command. It
+// never guesses an editor: with none resolved it prints the paths so the
+// operator opens them in whatever they use.
+func openInEditor(ed, base string, files []string) error {
 	full := make([]string, len(files))
 	for i, f := range files {
 		full[i] = filepath.Join(base, f)
 	}
-	if ed == "" {
-		fmt.Fprintln(os.Stderr, "[smith] $VISUAL/$EDITOR not set — open these paths in your editor:")
+	if strings.TrimSpace(ed) == "" {
+		fmt.Fprintln(os.Stderr, "[smith] no editor resolved. Set one of:")
+		fmt.Fprintln(os.Stderr, "  export EDITOR=nano        (must be EXPORTed — a bare EDITOR=... isn't inherited)")
+		fmt.Fprintln(os.Stderr, "  editor: nano              in $SMITH_HOME/config.yaml")
+		fmt.Fprintln(os.Stderr, "  smith review ... --editor nano")
+		fmt.Fprintln(os.Stderr, "meanwhile, open these paths yourself:")
 		for _, f := range full {
 			fmt.Println(f)
 		}

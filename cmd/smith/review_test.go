@@ -39,12 +39,14 @@ func TestReviewRunsAndOpenEditorFallsBack(t *testing.T) {
 		t.Fatalf("review changed tier to %d", e.Tier)
 	}
 
-	// No $VISUAL/$EDITOR: openInEditor prints paths and returns nil, never
-	// guesses an editor.
-	t.Setenv("VISUAL", "")
-	t.Setenv("EDITOR", "")
-	if err := openInEditor(filepath.Join(p.StoreQuarantine, "widget", "1.0.0"),
+	// Empty editor: openInEditor prints paths and returns nil, never guesses.
+	if err := openInEditor("", filepath.Join(p.StoreQuarantine, "widget", "1.0.0"),
 		[]string{"bin/widget"}); err != nil {
 		t.Fatalf("openInEditor with no editor should be a no-op, got %v", err)
+	}
+	// Blank/whitespace editor is treated as unset, not exec'd.
+	if err := openInEditor("   ", filepath.Join(p.StoreQuarantine, "widget", "1.0.0"),
+		[]string{"bin/widget"}); err != nil {
+		t.Fatalf("openInEditor with whitespace editor should be a no-op, got %v", err)
 	}
 }
