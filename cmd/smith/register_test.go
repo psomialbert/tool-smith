@@ -8,17 +8,38 @@ import (
 	"testing"
 
 	"smith/internal/index"
+	"smith/internal/sandbox"
 	"smith/internal/scaffold"
 )
 
+// requireSandbox skips a test unless a *functional* sandbox is available.
+// Presence on PATH isn't enough: some environments (e.g. GitHub Actions'
+// unprivileged Ubuntu runners) ship bwrap but forbid the network-namespace
+// setup `--unshare-net` needs, so bwrap aborts. Probe by actually running a
+// no-op sandboxed, and skip if it fails — smith itself correctly refuses to
+// run there (fail closed), which is not something these tests can exercise.
 func requireSandbox(t *testing.T) {
 	t.Helper()
 	bin := map[string]string{"darwin": "sandbox-exec", "linux": "bwrap"}[runtime.GOOS]
 	if bin == "" {
-		t.Skip("no sandbox on", runtime.GOOS)
+		t.Skipf("no sandbox on %s", runtime.GOOS)
 	}
 	if _, err := exec.LookPath(bin); err != nil {
 		t.Skipf("%s not available", bin)
+	}
+	work := t.TempDir()
+	tru, err := exec.LookPath("true")
+	if err != nil {
+		tru = "/usr/bin/true"
+	}
+	argv, err := sandbox.Command(filepath.Join(work, "profiles"), work, sandbox.Perms{}, []string{tru})
+	if err != nil {
+		t.Skipf("sandbox unavailable: %v", err)
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = work
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("sandbox present but not functional here (%v): %s", err, out)
 	}
 }
 

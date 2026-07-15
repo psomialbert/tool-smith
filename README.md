@@ -56,6 +56,17 @@ sandbox/profiles/default.sb         Seatbelt profile (written by `smith init`)
 `.gitignore` in `$SMITH_HOME` excludes `store/` so the home can become the
 Phase 2 index repo without ever committing binaries.
 
+## Sandbox host requirements
+
+Tier 0/2 tools run only sandboxed, so a functional sandbox is required to run
+(or self-test) them: macOS Seatbelt (`sandbox-exec`, built in) or Linux
+bubblewrap (`bwrap`) with **unprivileged user + network namespaces enabled**.
+smith fails closed where that's unavailable — e.g. GitHub Actions' Ubuntu
+runners forbid the netns setup `--unshare-net` needs, so Tier 0/2 tools can't
+run there (CI still builds/vets/tests the pure logic and exercises Seatbelt on
+macOS; the sandbox-execution tests skip when no functional sandbox is found).
+Escaping this class of restricted host is the v0.5 microVM/Landlock work.
+
 ## Decisions taken (spec §10 open questions)
 
 - **Language:** Go single-binary. Only deps: `yaml.v3`, `x/term`. Go itself is
