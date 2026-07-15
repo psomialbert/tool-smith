@@ -14,8 +14,8 @@ the decisions taken.
 | `smith list` / `status` | ✅ `--json` for the machine path |
 | `smith run <name> [args]` | ✅ re-verifies the sha256 pin **before every execution**; Tier 0/2 forced into sandbox, refuses to run if no sandbox mechanism exists |
 | `smith review <name>` | ✅ pre-promotion review. On a TTY: an interactive TUI (syntax-highlighted, arrow/PgUp-PgDn/g-G navigation, `n`/`p` between files, `space` to select line ranges, `c` to comment → emits an agent-pasteable report on quit). Re-checks bytes vs pins first. Also `--edit` (`$VISUAL`→`$EDITOR`→`config.yaml editor:`), `--paths`, `--plain` (dump; the default when piped). Config `review.theme` (dark/light/mono), `review.color`, `review.default` (tui/plain/edit/paths for the no-flag default). Footer always shows mode-appropriate keys. Read-only |
-| `smith promote` | ✅ minimal: interactive-TTY-gated review → moves quarantine→trusted, symlinks onto PATH, provenance records reviewer |
-| `smith demote <spec> --reason` | ✅ off PATH immediately, back to quarantine, reason recorded |
+| `smith promote` | ✅ interactive-TTY-gated review → moves quarantine→trusted, symlinks onto PATH, provenance records reviewer; offers to export the tool's SKILL.md into `~/.claude/skills/<name>/` so sessions discover it (config `skills.export`) |
+| `smith demote <spec> --reason` | ✅ off PATH immediately, back to quarantine, reason recorded; removes the exported skill so discovery stays in sync with trust |
 | `smith verify` | ✅ provenance hash-chain + all sha256 pins + PATH hygiene + trusted-bin symlink containment |
 | `smith new <name>` | ✅ scaffolds an agent-friendly CLI draft (bash / python-stdlib) in `$SMITH_HOME/drafts/` with self-test, SKILL.md stub, draft manifest |
 | `smith register <name>` | ✅ runs the draft's self-test **inside the sandbox**; failure blocks registration; pass → Tier 0 quarantine + printed promotion request |

@@ -102,9 +102,11 @@ Versions are themes, not promises; order within a release is by risk.
 - **`smith upgrade <name>`**: new-version flow for authored tools (copy
   draft, bump, diff against promoted version shown at review) and externals
   (re-add + re-verify, previous version demoted on promote).
-- **Skill export**: on promotion, offer to install the tool's SKILL.md into
-  `~/.claude/skills/<name>/` (resolves the spec §10 discovery question:
-  export at trust time, not authoring time).
+- ~~**Skill export**~~ **Shipped**: `smith promote` offers to install the
+  tool's SKILL.md into `~/.claude/skills/<name>/` (config `skills.dir`,
+  `skills.export: ask|always|never`), and `smith demote` removes it — so
+  discovery follows trust. Resolves the spec §10 discovery question: export
+  at trust time, not authoring time. Provenance logs a `skill-export` event.
 
 ## v0.5 — Sandbox v2
 

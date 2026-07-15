@@ -69,6 +69,29 @@ type FileConfig struct {
 	Editor string `yaml:"editor,omitempty"`
 	// Review configures the interactive reviewer.
 	Review ReviewConfig `yaml:"review,omitempty"`
+	// Skills configures exporting an authored tool's SKILL.md so future
+	// agent sessions discover it — done at promotion (trust) time, not
+	// authoring time, so only vetted tools become discoverable.
+	Skills SkillsConfig `yaml:"skills,omitempty"`
+}
+
+type SkillsConfig struct {
+	Dir    string `yaml:"dir,omitempty"`    // default ~/.claude/skills
+	Export string `yaml:"export,omitempty"` // ask (default) | always | never
+}
+
+// SkillsDir resolves the skills directory, expanding a leading ~.
+func (c FileConfig) SkillsDir() string {
+	d := c.Skills.Dir
+	if d == "" {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".claude", "skills")
+	}
+	if strings.HasPrefix(d, "~/") {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, d[2:])
+	}
+	return d
 }
 
 type ReviewConfig struct {

@@ -1162,7 +1162,59 @@ func cmdPromote(p config.Paths, args []string) error {
 		return err
 	}
 	fmt.Printf("promoted: %s@%s is now Tier 1 (trusted, on PATH via %s)\n", e.Name, e.Version, p.TrustedBin)
+	maybeExportSkill(p, rd, e)
 	return nil
+}
+
+// maybeExportSkill offers to publish a just-promoted tool's SKILL.md into the
+// skills dir so future agent sessions discover it. Discovery follows trust:
+// only vetted (Tier 1) tools are exported, and demotion removes them.
+func maybeExportSkill(p config.Paths, rd *bufio.Reader, e index.Entry) {
+	src := filepath.Join(store.TrustedDir(p.StoreTrusted, e.Name, e.Version), "SKILL.md")
+	if _, err := os.Stat(src); err != nil {
+		return // no SKILL.md (e.g. external tool) — nothing to export
+	}
+	fc, _ := p.LoadFileConfig()
+	mode := fc.Skills.Export
+	if mode == "" {
+		mode = "ask"
+	}
+	if mode == "never" {
+		return
+	}
+	dst := filepath.Join(fc.SkillsDir(), e.Name, "SKILL.md")
+	if mode == "ask" {
+		fmt.Printf("Export SKILL.md to %s so agent sessions discover %s? [y/N]: ", dst, e.Name)
+		ans, _ := rd.ReadString('\n')
+		if s := strings.TrimSpace(strings.ToLower(ans)); s != "y" && s != "yes" {
+			fmt.Println("skipped skill export")
+			return
+		}
+	}
+	if err := copyPlain(src, dst); err != nil {
+		fmt.Fprintf(os.Stderr, "[smith] skill export failed: %v\n", err)
+		return
+	}
+	_ = provenance.Append(p.ProvenanceLog, provenance.Entry{
+		Event: "skill-export", Tool: e.Name, Version: e.Version,
+		Actor: config.Actor(), Origin: dst,
+	})
+	fmt.Printf("exported skill: %s\n", dst)
+}
+
+// removeExportedSkill deletes a tool's exported skill dir (called on demote so
+// discovery stays in sync with trust). Silent if none exists.
+func removeExportedSkill(p config.Paths, name string) {
+	fc, _ := p.LoadFileConfig()
+	dir := filepath.Join(fc.SkillsDir(), name)
+	if _, err := os.Stat(filepath.Join(dir, "SKILL.md")); err != nil {
+		return
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "[smith] could not remove exported skill %s: %v\n", dir, err)
+		return
+	}
+	fmt.Printf("removed exported skill: %s\n", dir)
 }
 
 // pushBlob enforces the §5.3 source rule at promotion time: an authored
@@ -1287,6 +1339,7 @@ func cmdDemote(p config.Paths, args []string) error {
 	}); err != nil {
 		return err
 	}
+	removeExportedSkill(p, e.Name) // discovery follows trust: revoke the skill too
 	fmt.Printf("demoted: %s@%s -> Tier 2 quarantine, removed from PATH\n", e.Name, e.Version)
 	return nil
 }
