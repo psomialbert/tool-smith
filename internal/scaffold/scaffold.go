@@ -22,11 +22,19 @@ var Runtimes = []string{"bash", "python"}
 // Manifest is the draft manifest (unversioned-draft in spec terms: it exists
 // only in the draft dir until registration pins it into the index).
 type Manifest struct {
-	Name        string `yaml:"name"`
-	Version     string `yaml:"version"`
-	Description string `yaml:"description"`
-	Runtime     string `yaml:"runtime"`
-	Entrypoint  string `yaml:"entrypoint"` // file in the draft dir that becomes bin/<name>
+	Name        string       `yaml:"name"`
+	Version     string       `yaml:"version"`
+	Description string       `yaml:"description"`
+	Runtime     string       `yaml:"runtime"`
+	Entrypoint  string       `yaml:"entrypoint"`        // file in the draft dir that becomes bin/<name>
+	Sandbox     *SandboxSpec `yaml:"sandbox,omitempty"` // per-tool grants beyond the strict default
+}
+
+// SandboxSpec is the tool's requested sandbox relaxations. Absent = the
+// strict default (no network, writes confined to CWD+TMP). Any grant here is
+// surfaced at promotion review — a tool asking for network is a flag to scrutinize.
+type SandboxSpec struct {
+	Network bool `yaml:"network,omitempty"`
 }
 
 func render(tpl string, m Manifest) (string, error) {

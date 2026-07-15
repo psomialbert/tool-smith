@@ -694,7 +694,11 @@ func runSelfTest(p config.Paths, dir, entry string) error {
 		return err
 	}
 	defer os.RemoveAll(work)
-	argv, err := sandbox.Command(p.SandboxProfiles, work, []string{"/bin/bash", st, entry})
+	// Self-tests always run under the strict default (no network): this is
+	// the least-trusted moment — brand-new code auto-run by register. A
+	// network-declaring tool must exercise its offline logic here; its live
+	// behavior is validated by the human via `smith run` after review.
+	argv, err := sandbox.Command(p.SandboxProfiles, work, sandbox.Perms{}, []string{"/bin/bash", st, entry})
 	if err != nil {
 		return err // no sandbox -> no self-test -> no registration
 	}
@@ -814,14 +818,19 @@ func cmdRun(p config.Paths, args []string) error {
 	argv := append([]string{bin}, toolArgs...)
 	env := os.Environ()
 	if e.Tier != 1 {
-		wrapped, err := sandbox.Command(p.SandboxProfiles, "", argv)
+		perms := toolPerms(base)
+		wrapped, err := sandbox.Command(p.SandboxProfiles, "", perms, argv)
 		if err != nil {
 			return err // never fall back to unsandboxed
 		}
 		if env, err = sandbox.Env(passEnv); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "[smith] tier %d tool — running sandboxed (no network, writes limited to CWD+TMP, env sanitized)\n", e.Tier)
+		net := "no network"
+		if perms.Network {
+			net = "NETWORK GRANTED (per manifest)"
+		}
+		fmt.Fprintf(os.Stderr, "[smith] tier %d tool — running sandboxed (%s, writes limited to CWD+TMP, env sanitized)\n", e.Tier, net)
 		argv = wrapped
 	}
 	exe, err := exec.LookPath(argv[0])
@@ -847,6 +856,17 @@ func effectiveArtifacts(e index.Entry, base string) []index.Artifact {
 		return out
 	}
 	return nil
+}
+
+// toolPerms reads a tool's sandbox grant from its bundle manifest. Authored
+// tools ship manifest.yaml; external tools have none, so they get the strict
+// default (no network).
+func toolPerms(base string) sandbox.Perms {
+	m, err := scaffold.LoadManifest(base)
+	if err != nil || m.Sandbox == nil {
+		return sandbox.Perms{}
+	}
+	return sandbox.Perms{Network: m.Sandbox.Network}
 }
 
 func pickArtifact(arts []index.Artifact, name, spec string) (index.Artifact, error) {
@@ -912,6 +932,11 @@ func cmdReview(p config.Paths, args []string) error {
 	fmt.Printf("added:        %s\n", e.AddedAt)
 	if e.Verification != "" {
 		fmt.Printf("verification: %s\n", e.Verification)
+	}
+	if perms := toolPerms(base); perms.Network {
+		fmt.Printf("sandbox:      ⚠ NETWORK egress requested (scrutinize why this tool needs it)\n")
+	} else {
+		fmt.Printf("sandbox:      default (no network; writes CWD+TMP)\n")
 	}
 
 	// Integrity: the bytes you're about to read must match the pins, or the
@@ -1892,6 +1917,82 @@ func parseAge(s string) (time.Duration, error) {
 	return d, nil
 }
 
+// runSandboxProbes exercises the live sandbox with a hostile tool and checks
+// the containment holds: writes outside CWD are blocked, CWD writes work,
+// network is denied by default and permitted only with a grant. This turns
+// the ad-hoc escape tests into a first-class, on-demand check (`verify
+// --sandbox`) that runs against whatever mechanism is active on this host.
+func runSandboxProbes(p config.Paths) []verifyResult {
+	var out []verifyResult
+	work, err := os.MkdirTemp("", "smith-probe-")
+	if err != nil {
+		return []verifyResult{{Check: "sandbox:setup", OK: false, Detail: err.Error()}}
+	}
+	defer os.RemoveAll(work)
+
+	home, _ := os.UserHomeDir()
+	marker := filepath.Join(home, ".smith-escape-probe")
+	os.Remove(marker)
+	defer os.Remove(marker)
+
+	runProbe := func(perms sandbox.Perms, script string) (string, error) {
+		sp := filepath.Join(work, "probe.sh")
+		if err := os.WriteFile(sp, []byte(script), 0o755); err != nil {
+			return "", err
+		}
+		argv, err := sandbox.Command(p.SandboxProfiles, work, perms, []string{"/bin/bash", sp})
+		if err != nil {
+			return "", err
+		}
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Dir = work
+		cmd.Env, _ = sandbox.Env(nil)
+		b, _ := cmd.CombinedOutput()
+		return string(b), nil
+	}
+
+	// Write confinement: escaping to $HOME must fail; CWD write must work.
+	wOut, err := runProbe(sandbox.Perms{}, "#!/bin/bash\n"+
+		"touch \""+marker+"\" 2>/dev/null && echo WROTE_HOME || echo home_blocked\n"+
+		"touch ./cwd_ok 2>/dev/null && echo cwd_ok || echo cwd_blocked\n")
+	switch {
+	case err != nil:
+		out = append(out, verifyResult{Check: "sandbox:write-confinement", OK: false, Detail: err.Error()})
+	case strings.Contains(wOut, "WROTE_HOME"):
+		out = append(out, verifyResult{Check: "sandbox:write-confinement", OK: false, Detail: "ESCAPED: wrote outside CWD to $HOME"})
+	case !strings.Contains(wOut, "cwd_ok"):
+		out = append(out, verifyResult{Check: "sandbox:write-confinement", OK: false, Detail: "CWD write unexpectedly blocked"})
+	default:
+		out = append(out, verifyResult{Check: "sandbox:write-confinement", OK: true})
+	}
+
+	// Network probes only run if the host itself has network (else we can't
+	// distinguish "denied" from "offline"). The deny check is security-
+	// critical; the grant check confirms the opt-in mechanism works.
+	netScript := "#!/bin/bash\ncurl -sS --max-time 6 https://example.com -o /dev/null && echo NET || echo nonet\n"
+	baseline := exec.Command("/bin/bash", "-c", "curl -sS --max-time 6 https://example.com -o /dev/null && echo NET || echo nonet")
+	base, _ := baseline.CombinedOutput()
+	if !strings.Contains(string(base), "NET") {
+		out = append(out, verifyResult{Check: "sandbox:network", OK: true, Detail: "skipped (host has no network baseline)"})
+		return out
+	}
+	if denyOut, err := runProbe(sandbox.Perms{}, netScript); err != nil {
+		out = append(out, verifyResult{Check: "sandbox:network-deny", OK: false, Detail: err.Error()})
+	} else if strings.Contains(denyOut, "NET") {
+		out = append(out, verifyResult{Check: "sandbox:network-deny", OK: false, Detail: "ESCAPED: network reachable under strict default"})
+	} else {
+		out = append(out, verifyResult{Check: "sandbox:network-deny", OK: true})
+	}
+	if grantOut, err := runProbe(sandbox.Perms{Network: true}, netScript); err != nil {
+		out = append(out, verifyResult{Check: "sandbox:network-grant", OK: false, Detail: err.Error()})
+	} else if !strings.Contains(grantOut, "NET") {
+		out = append(out, verifyResult{Check: "sandbox:network-grant", OK: false, Detail: "grant did not enable network"})
+	} else {
+		out = append(out, verifyResult{Check: "sandbox:network-grant", OK: true})
+	}
+	return out
+}
+
 // ---------------------------------------------------------------- verify
 
 type verifyResult struct {
@@ -1905,11 +2006,18 @@ type verifyResult struct {
 func cmdVerify(p config.Paths, args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "machine-readable output")
+	sandboxCheck := fs.Bool("sandbox", false, "additionally run the hostile-tool escape battery against the live sandbox")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	var results []verifyResult
 	add := func(r verifyResult) { results = append(results, r) }
+
+	if *sandboxCheck {
+		for _, r := range runSandboxProbes(p) {
+			add(r)
+		}
+	}
 
 	// Every per-machine provenance chain must verify.
 	logs, _ := filepath.Glob(filepath.Join(filepath.Dir(p.ProvenanceLog), "*.jsonl"))
