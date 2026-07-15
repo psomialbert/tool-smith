@@ -21,8 +21,17 @@ import (
 const (
 	LevelAttested = "gh-attestation" // SLSA provenance verified against source repo
 	LevelRegistry = "aqua-registry"  // curated registry with checksum verification (mise)
-	LevelTOFU     = "tofu"           // only smith's own first-use sha256 pin
+	LevelChecksum = "mise-checksum"  // backend records a download checksum in mise.lock
+	LevelTOFU     = "tofu"           // no upstream integrity; only smith's own first-use pin
 )
+
+// checksumBackends are the mise backends that record a download checksum in
+// mise.lock (per mise's backend support matrix). Tools from these can be
+// pin-verified on re-fetch, so they are allowed without --allow-unverified.
+// Everything else (asdf/cargo/go/npm/pipx/vfox — version-only) stays TOFU.
+var checksumBackends = map[string]bool{
+	"ubi": true, "github": true, "gitlab": true, "http": true,
+}
 
 // GitHubRepo extracts owner/repo from a backend spec like "aqua:cli/cli" or
 // "ubi:BurntSushi/ripgrep". Empty when the spec has no GitHub coordinates.
@@ -40,11 +49,21 @@ func GitHubRepo(backendSpec string) string {
 
 // BackendLevel maps a backend spec to its baseline verification level.
 func BackendLevel(backendSpec string) string {
-	if strings.HasPrefix(backendSpec, "aqua:") {
+	kind, _, _ := strings.Cut(backendSpec, ":")
+	switch {
+	case kind == "aqua":
 		return LevelRegistry
+	case checksumBackends[kind]:
+		return LevelChecksum
+	default:
+		return LevelTOFU // asdf/cargo/go/npm/pipx/vfox: version-only, no integrity
 	}
-	return LevelTOFU // ubi/asdf/cargo/go/npm: no curated checksum registry
 }
+
+// Allowed reports whether a level clears the add-time policy without
+// --allow-unverified: anything with upstream integrity does; bare TOFU
+// does not.
+func Allowed(level string) bool { return level != LevelTOFU }
 
 type Result struct {
 	Level         string `json:"level"`

@@ -6,7 +6,10 @@ func TestBackendLevel(t *testing.T) {
 	cases := map[string]string{
 		"aqua:cli/cli":               LevelRegistry,
 		"aqua:jqlang/jq":             LevelRegistry,
-		"ubi:BurntSushi/ripgrep":     LevelTOFU,
+		"ubi:BurntSushi/ripgrep":     LevelChecksum,
+		"github:cli/cli":             LevelChecksum,
+		"gitlab:group/proj":          LevelChecksum,
+		"http:example.com/x":         LevelChecksum,
 		"asdf:mise-plugins/mise-eza": LevelTOFU,
 		"cargo:magika-cli":           LevelTOFU,
 		"go:github.com/onsi/ginkgo":  LevelTOFU,
@@ -16,6 +19,9 @@ func TestBackendLevel(t *testing.T) {
 		if got := BackendLevel(spec); got != want {
 			t.Errorf("BackendLevel(%q) = %q, want %q", spec, got, want)
 		}
+	}
+	if Allowed(LevelTOFU) || !Allowed(LevelChecksum) || !Allowed(LevelRegistry) || !Allowed(LevelAttested) {
+		t.Error("Allowed() policy wrong: only TOFU should be disallowed")
 	}
 }
 

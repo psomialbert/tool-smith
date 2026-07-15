@@ -331,8 +331,27 @@ func cmdAdd(p config.Paths, args []string) error {
 	}); err != nil {
 		return err
 	}
+
+	// Capture a signed cross-platform checksum record (mise.lock) so the
+	// index carries integrity metadata for every configured platform, not
+	// just this machine's. Best-effort: the tool is already registered with
+	// smith's own pin; a lock failure is a warning, not a rollback.
+	fc, _ := p.LoadFileConfig()
+	lockPath := filepath.Join(p.IndexTools, name, version, "mise.lock")
+	if err := misex.Lock(spec, lockPath, fc.Platforms); err != nil {
+		fmt.Fprintf(os.Stderr, "[smith] warning: could not lock cross-platform checksums: %v\n", err)
+	} else {
+		plats := fc.Platforms
+		if len(plats) == 0 {
+			plats = []string{"this platform"}
+		}
+		fmt.Fprintf(os.Stderr, "[smith] locked checksums for: %s (index/tools/%s/%s/mise.lock)\n",
+			strings.Join(plats, ", "), name, version)
+	}
+
 	fmt.Printf("added %s at Tier 2 (external quarantine)\n", spec)
 	fmt.Printf("  store: %s\n", qdir)
+	fmt.Printf("  verification: %s\n", verification)
 	for _, a := range artifacts {
 		fmt.Printf("  %s  sha256=%s\n", a.Path, a.Sha256)
 	}

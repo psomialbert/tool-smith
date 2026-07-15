@@ -60,6 +60,10 @@ func Resolve() (Paths, error) {
 // FileConfig is $SMITH_HOME/config.yaml.
 type FileConfig struct {
 	Transport transport.Config `yaml:"transport"`
+	// Platforms are mise platform names to capture checksums for when adding
+	// external tools (e.g. [macos-arm64, linux-x64, linux-arm64]). Empty =
+	// just this machine's platform (mise's default).
+	Platforms []string `yaml:"platforms,omitempty"`
 }
 
 func (p Paths) LoadFileConfig() (FileConfig, error) {

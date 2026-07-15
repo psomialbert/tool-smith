@@ -81,15 +81,16 @@ func LoadPublicKey(home string) (ed25519.PublicKey, error) {
 }
 
 // ManifestDigest computes the canonical digest: sha256 over
-// "relpath\x00sha256(file)\n" for every .yaml under indexTools, sorted by
-// path. Index text is data — the digest binds bytes, it never interprets
-// them. (The public key itself is TOFU: it authenticates the set but cannot
+// "relpath\x00sha256(file)\n" for every regular file under indexTools
+// (manifests and the per-tool mise.lock checksum records), sorted by path.
+// Index content is data — the digest binds bytes, it never interprets them.
+// (The public key itself is TOFU: it authenticates the set but cannot
 // authenticate itself; verify its fingerprint out-of-band on new machines.)
 func ManifestDigest(home, indexTools string) (string, error) {
 	type item struct{ rel, sum string }
 	var items []item
 	err := filepath.WalkDir(indexTools, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".yaml") {
+		if err != nil || d.IsDir() {
 			return err
 		}
 		raw, err := os.ReadFile(path)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -36,6 +37,55 @@ func Install(spec string) error {
 	cmd.Stdout = os.Stderr // progress is diagnostics, keep stdout machine-clean
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// Lock generates a cross-platform lockfile for spec at lockPath, capturing
+// checksums for the given platforms (current platform always included by
+// mise). It runs in a throwaway project so it never disturbs the caller's
+// mise state, then moves the produced mise.lock to lockPath. Returns the
+// number of platform entries locked.
+func Lock(spec, lockPath string, platforms []string) error {
+	name, _, _ := strings.Cut(spec, "@")
+	ver := ""
+	if i := strings.Index(spec, "@"); i >= 0 {
+		ver = spec[i+1:]
+	}
+	work, err := os.MkdirTemp("", "smith-lock-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work)
+	toml := fmt.Sprintf("[tools]\n%q = %q\n", name, ver)
+	if err := os.WriteFile(filepath.Join(work, "mise.toml"), []byte(toml), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(work, "mise.lock"), nil, 0o644); err != nil {
+		return err
+	}
+	trust := exec.Command("mise", "trust")
+	trust.Dir = work
+	trust.Stdout, trust.Stderr = os.Stderr, os.Stderr
+	_ = trust.Run()
+
+	args := []string{"lock"}
+	if len(platforms) > 0 {
+		args = append(args, "--platform", strings.Join(platforms, ","))
+	}
+	cmd := exec.Command("mise", args...)
+	cmd.Dir = work
+	cmd.Env = append(os.Environ(), "MISE_ALWAYS_KEEP_DOWNLOAD=1")
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("mise lock %s: %w", spec, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(work, "mise.lock"))
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(lockPath, raw, 0o644)
 }
 
 // Registry returns the primary backend spec for a short tool name, e.g.

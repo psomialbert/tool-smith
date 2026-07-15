@@ -46,28 +46,46 @@ Versions are themes, not promises; order within a release is by risk.
   `Entry.Schema` (current = 1), `migrate()` runs on load and backfills
   pre-versioning entries (Schema 0 → platform `any`); `Save` always stamps
   the current version.
-- **CI**: GitHub Actions running `go test ./...` + `scripts/linux-e2e.sh`
-  (minus the private-index step) on push. *(still open)*
+- ~~**CI**~~ **Shipped** (`.github/workflows/ci.yml`): gofmt + vet + build +
+  `go test ./...` on ubuntu + macos (bwrap installed on Linux, sandbox-exec
+  built into macOS), Go provisioned via mise-action. The privileged
+  container e2e stays a local pre-release step. *Unverified until the code
+  repo has a GitHub remote + first push.*
 - **Dogfood milestone** (done): `calc`, a safe AST-based expression
   evaluator, authored end-to-end through `smith new`/`register` and living
   at Tier 0 in the real index awaiting human promotion — the authoring loop
   proven on a non-trivial tool, including self-test assertions that reject
   code execution.
 
-## v0.3 — Lean on mise.lock
+## v0.3 — Lean on mise.lock (started)
 
-- `smith add` drives `mise lock <tool> --platform <all-my-platforms>` and
-  imports checksums for **every** platform into the index at add time — a
-  tool reviewed once is pin-verified everywhere, removing today's
-  "machine B re-adds and re-reviews externals" friction (the trust decision
-  can then legitimately travel, since the reviewed *version*'s bytes are
-  pinned per platform up front).
-- Delegate attestation to mise's provenance verification where the backend
-  supports it (aqua/http/github/gitlab); keep our direct
-  `gh attestation verify` as fallback for backends mise doesn't cover.
-  Record mise's verified provenance type in `verification`.
-- Revisit TOFU policy: `ubi` gains checksum support in mise.lock, so it may
-  graduate from refuse-by-default to checksum-level.
+- ~~`smith add` drives `mise lock --platform` and captures cross-platform
+  checksums.~~ **Shipped**: add generates a per-tool `mise.lock` under
+  `index/tools/<name>/<version>/` covering the platforms in
+  `config.yaml` `platforms:` (default: this machine). `ManifestDigest` now
+  hashes every file under `index/tools` (not just `.yaml`), so the lockfile
+  is part of the signed, tamper-evident index — verified live: editing a
+  locked checksum makes `smith verify` fail the signature check.
+- ~~Revisit TOFU policy.~~ **Shipped**: backends that record a download
+  checksum in mise.lock (`ubi`/`github`/`gitlab`/`http`) graduate from
+  refuse-by-default to `mise-checksum` level; `aqua` stays `aqua-registry`;
+  version-only backends (`asdf`/`cargo`/`go`/`npm`/`pipx`/`vfox`) remain
+  TOFU, refused unless `--allow-unverified`. Policy is `attest.Allowed()`.
+- **Still open — cross-platform external *fetch*.** The signed lockfile now
+  *carries* other platforms' checksums, but `smith fetch` doesn't yet
+  consume them: machine B still can't materialize a darwin-added external on
+  linux without its own `smith add`. Wiring fetch to install-via-lockfile +
+  verify is next. **Design note discovered while building:** externals have
+  different bytes per platform, so B must compute its own extracted-binary
+  pin — but that pin lives in the shared, signed index file. Storing a
+  machine-computed pin into a signed shared entry diverges from what the
+  signer produced. The fix is to have the *archive* checksum (deterministic,
+  in mise.lock, signed) be the cross-machine integrity anchor, and treat the
+  per-machine extracted pin as local-only state that `run` checks. That
+  separation is the real Phase-2-of-v0.3 work, not a quick wire-up.
+- Delegate attestation more deeply to mise's provenance verification (read
+  the `provenance` field mise records in the lockfile) — still open; today
+  we record backend class + our own `gh attestation verify`.
 
 ## v0.4 — Authoring depth
 
