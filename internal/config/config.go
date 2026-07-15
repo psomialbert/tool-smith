@@ -74,6 +74,9 @@ type FileConfig struct {
 type ReviewConfig struct {
 	Theme string `yaml:"theme,omitempty"` // dark | light | mono
 	Color string `yaml:"color,omitempty"` // auto | always | never
+	// Default is what `smith review` does with no mode flag on a TTY:
+	// tui (default) | plain | edit | paths.
+	Default string `yaml:"default,omitempty"`
 }
 
 func (p Paths) LoadFileConfig() (FileConfig, error) {

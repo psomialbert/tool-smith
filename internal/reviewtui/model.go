@@ -35,7 +35,6 @@ type Model struct {
 	Comments      []Comment
 	Mode          Mode
 	Input         string
-	Status        string
 	Quit          bool
 
 	cur    int
@@ -124,13 +123,13 @@ func (m *Model) PrevFile(viewRows int) {
 }
 
 // ToggleSelect starts a selection anchored at the cursor, or clears it.
+func (m *Model) Selecting() bool { return m.anchor[m.cur] >= 0 }
+
 func (m *Model) ToggleSelect() {
 	if m.anchor[m.cur] < 0 {
 		m.anchor[m.cur] = m.cursor[m.cur]
-		m.Status = "selecting — move to extend, c to comment"
 	} else {
 		m.anchor[m.cur] = -1
-		m.Status = "selection cleared"
 	}
 }
 
@@ -142,7 +141,6 @@ func (m *Model) StartComment() {
 func (m *Model) CancelComment() {
 	m.Mode = ModeNormal
 	m.Input = ""
-	m.Status = "comment cancelled"
 }
 
 func (m *Model) InputRune(r rune) { m.Input += string(r) }
@@ -160,8 +158,7 @@ func (m *Model) CommitComment() {
 	m.Mode = ModeNormal
 	m.Input = ""
 	if text == "" {
-		m.Status = "empty comment discarded"
-		return
+		return // empty comment discarded
 	}
 	lo, hi := m.Sel()
 	f := m.Files[m.cur]
@@ -170,7 +167,6 @@ func (m *Model) CommitComment() {
 		File: f.Name, Start: lo + 1, End: hi + 1, Text: text, Snippet: snippet,
 	})
 	m.anchor[m.cur] = -1
-	m.Status = fmt.Sprintf("comment added (%d total)", len(m.Comments))
 }
 
 // Report renders all comments as an agent-pasteable markdown review.

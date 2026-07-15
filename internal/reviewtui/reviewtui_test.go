@@ -96,6 +96,24 @@ func TestRenderCursorAndSelectionMarkers(t *testing.T) {
 	}
 }
 
+func TestFooterAlwaysShowsModeHints(t *testing.T) {
+	m := New("calc", "0.1.0", sampleFiles())
+	if !strings.Contains(footer(m), "space select") || !strings.Contains(footer(m), "q quit") {
+		t.Fatalf("normal footer missing hints: %q", footer(m))
+	}
+	m.ToggleSelect()
+	sel := footer(m)
+	if !strings.Contains(sel, "SELECT") || !strings.Contains(sel, "space cancel") || !strings.Contains(sel, "c comment") {
+		t.Fatalf("select footer must show cancel + comment hints: %q", sel)
+	}
+	m.StartComment()
+	m.InputRune('h')
+	cm := footer(m)
+	if !strings.Contains(cm, "Esc cancel") || !strings.Contains(cm, "Enter save") || !strings.Contains(cm, "h_") {
+		t.Fatalf("comment footer must show save/cancel + input: %q", cm)
+	}
+}
+
 // End-to-end through the real loop with scripted keys — proves ParseKey,
 // dispatch, model, and quit all compose. Keys: down, space, down (select
 // 2-3), c, type text, Enter, q.

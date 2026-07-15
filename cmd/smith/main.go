@@ -785,10 +785,14 @@ func cmdReview(p config.Paths, args []string) error {
 		}
 	}
 
-	// Pick a mode. Explicit flags win. Default is the interactive TUI on a
-	// real terminal; piped/non-TTY falls back to a plain dump so
-	// `smith review x | less` and agents still work.
+	// Pick a mode. Explicit flags win; otherwise the config default (tui
+	// unless overridden) applies on a real terminal. Piped/non-TTY always
+	// falls back to a plain dump so `smith review x | less` and agents work.
 	tty := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	def := fc.Review.Default
+	if def == "" {
+		def = "tui"
+	}
 	mode := ""
 	switch {
 	case *edit || *editor != "":
@@ -797,13 +801,18 @@ func cmdReview(p config.Paths, args []string) error {
 		mode = "paths"
 	case *plain:
 		mode = "plain"
-	case *inline || tty:
+	case *inline:
 		mode = "tui"
+	case tty:
+		mode = def // configurable: tui | plain | edit | paths
 	default:
 		mode = "plain"
 	}
 	if mode == "tui" && !tty {
 		mode = "plain" // can't drive a TUI without a terminal
+	}
+	if mode != "tui" && mode != "plain" && mode != "edit" && mode != "paths" {
+		return fmt.Errorf("config review.default %q is not one of tui|plain|edit|paths", def)
 	}
 
 	switch mode {

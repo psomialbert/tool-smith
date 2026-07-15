@@ -59,25 +59,34 @@ func Render(m *Model, rows, cols int, theme Theme) []string {
 		}
 	}
 
-	// Status / comment bar.
-	var status string
-	if m.Mode == ModeComment {
-		lo1, hi1 := m.Sel()
-		rng := strconv.Itoa(lo1 + 1)
-		if hi1 != lo1 {
-			rng += "-" + strconv.Itoa(hi1+1)
-		}
-		status = fmt.Sprintf(" comment %s:%s> %s_", f.Name, rng, m.Input)
-	} else if m.Status != "" {
-		status = " " + m.Status + "  ·  q quit"
-	} else {
-		status = " ↑↓/jk move · space select · c comment · n/p file · g/G ends · q quit"
-		if len(m.Comments) > 0 {
-			status += fmt.Sprintf(" · %d comment%s", len(m.Comments), plural(len(m.Comments)))
-		}
-	}
-	out = append(out, bar(status, cols, theme))
+	// Footer: always mode-appropriate key hints, so the available commands
+	// stay visible mid-selection and mid-comment, and the exits are named.
+	out = append(out, bar(footer(m), cols, theme))
 	return out
+}
+
+// footer returns the key-hint line for the current mode.
+func footer(m *Model) string {
+	switch m.Mode {
+	case ModeComment:
+		lo, hi := m.Sel()
+		rng := strconv.Itoa(lo + 1)
+		if hi != lo {
+			rng += "-" + strconv.Itoa(hi+1)
+		}
+		// Cancel/save named first so the way out is always visible even if a
+		// long comment truncates the tail.
+		return fmt.Sprintf(" COMMENT %s [Enter save · Esc cancel] > %s_", rng, m.Input)
+	}
+	if m.Selecting() {
+		lo, hi := m.Sel()
+		return fmt.Sprintf(" SELECT %d-%d · move to extend · c comment · space cancel · q quit", lo+1, hi+1)
+	}
+	hint := " ↑↓/jk move · space select · c comment · n/p file · g/G ends · q quit"
+	if len(m.Comments) > 0 {
+		hint += fmt.Sprintf(" · %d comment%s", len(m.Comments), plural(len(m.Comments)))
+	}
+	return hint
 }
 
 // bar fits s to width and, when colored, renders it reverse-video.
