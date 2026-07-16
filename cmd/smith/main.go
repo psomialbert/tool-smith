@@ -77,6 +77,8 @@ func main() {
 		err = cmdPublish(paths, args)
 	case "key":
 		err = cmdKey(paths, args)
+	case "skill":
+		err = cmdSkill(paths, args)
 	case "fetch":
 		err = cmdFetch(paths, args)
 	case "sync":
@@ -119,6 +121,7 @@ Usage:
   smith register <name>             sandbox-run the draft's self-test; pass -> Tier 0 + promotion request
   smith publish                     sign the manifest set + commit/push the index repo
   smith key list|rotate|add <pub>|revoke <fprint>   manage signing keys (multi-key + rotation)
+  smith skill list|export <name>|remove <name>      manage exported discovery skills for promoted tools
   smith fetch <name>[@<ver>]        install a tool on this machine from the index (checksum + signature verified)
   smith sync                        pull the index repo + reconcile: tools demoted upstream come off PATH now
   smith gc [--older-than 30d] [--yes]  remove unpromoted Tier 0 versions + stale drafts (dry-run unless --yes)
@@ -1495,8 +1498,7 @@ func cmdPromote(p config.Paths, args []string) error {
 // skills dir so future agent sessions discover it. Discovery follows trust:
 // only vetted (Tier 1) tools are exported, and demotion removes them.
 func maybeExportSkill(p config.Paths, rd *bufio.Reader, e index.Entry) {
-	src := filepath.Join(store.TrustedDir(p.StoreTrusted, e.Name, e.Version), "SKILL.md")
-	if _, err := os.Stat(src); err != nil {
+	if _, err := os.Stat(filepath.Join(store.TrustedDir(p.StoreTrusted, e.Name, e.Version), "SKILL.md")); err != nil {
 		return // no SKILL.md (e.g. external tool) — nothing to export
 	}
 	fc, _ := p.LoadFileConfig()
@@ -1507,24 +1509,102 @@ func maybeExportSkill(p config.Paths, rd *bufio.Reader, e index.Entry) {
 	if mode == "never" {
 		return
 	}
-	dst := filepath.Join(fc.SkillsDir(), e.Name, "SKILL.md")
 	if mode == "ask" {
-		fmt.Printf("Export SKILL.md to %s so agent sessions discover %s? [y/N]: ", dst, e.Name)
+		// Default Yes: promoting a tool almost always means you want it
+		// discoverable. Enter (or y) exports; only an explicit n opts out.
+		fmt.Printf("Export SKILL.md to %s so agent sessions discover %s? [Y/n]: ",
+			filepath.Join(fc.SkillsDir(), e.Name, "SKILL.md"), e.Name)
 		ans, _ := rd.ReadString('\n')
-		if s := strings.TrimSpace(strings.ToLower(ans)); s != "y" && s != "yes" {
-			fmt.Println("skipped skill export")
+		if s := strings.TrimSpace(strings.ToLower(ans)); s == "n" || s == "no" {
+			fmt.Println("skipped skill export (run `smith skill export " + e.Name + "` later to add it)")
 			return
 		}
 	}
-	if err := copyPlain(src, dst); err != nil {
+	dst, err := exportSkillFile(p, e)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "[smith] skill export failed: %v\n", err)
 		return
+	}
+	fmt.Printf("exported skill: %s\n", dst)
+}
+
+// exportSkillFile copies a Tier-1 tool's SKILL.md into the skills dir and logs
+// it. Returns ("", nil) if the tool has no SKILL.md (e.g. an external tool).
+func exportSkillFile(p config.Paths, e index.Entry) (string, error) {
+	src := filepath.Join(store.TrustedDir(p.StoreTrusted, e.Name, e.Version), "SKILL.md")
+	if _, err := os.Stat(src); err != nil {
+		return "", nil
+	}
+	fc, _ := p.LoadFileConfig()
+	dst := filepath.Join(fc.SkillsDir(), e.Name, "SKILL.md")
+	if err := copyPlain(src, dst); err != nil {
+		return "", err
 	}
 	_ = provenance.Append(p.ProvenanceLog, provenance.Entry{
 		Event: "skill-export", Tool: e.Name, Version: e.Version,
 		Actor: config.Actor(), Origin: dst,
 	})
-	fmt.Printf("exported skill: %s\n", dst)
+	return dst, nil
+}
+
+// cmdSkill manages exported discovery skills for promoted tools, so an
+// already-promoted tool's SKILL.md can be (re)exported without re-promoting.
+func cmdSkill(p config.Paths, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: smith skill list|export <name>[@ver]|remove <name>")
+	}
+	fc, _ := p.LoadFileConfig()
+	switch args[0] {
+	case "list":
+		entries, err := index.List(p.IndexTools)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("skills dir: %s\n", fc.SkillsDir())
+		fmt.Printf("%-16s %-10s %s\n", "TOOL", "TIER", "SKILL EXPORTED")
+		for _, e := range entries {
+			if e.Tier != 1 {
+				continue
+			}
+			status := "-"
+			if _, err := os.Stat(filepath.Join(fc.SkillsDir(), e.Name, "SKILL.md")); err == nil {
+				status = "yes"
+			} else if _, err := os.Stat(filepath.Join(store.TrustedDir(p.StoreTrusted, e.Name, e.Version), "SKILL.md")); err != nil {
+				status = "(no SKILL.md)"
+			}
+			fmt.Printf("%-16s %-10s %s\n", e.Name, "1 TRUSTED", status)
+		}
+		return nil
+	case "export":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: smith skill export <name>[@version]")
+		}
+		name, version := splitSpec(args[1])
+		e, err := index.Resolve(p.IndexTools, name, version)
+		if err != nil {
+			return err
+		}
+		if e.Tier != 1 {
+			return fmt.Errorf("%s is tier %d; only Tier 1 (trusted) tools export skills — promote it first", e.Name, e.Tier)
+		}
+		dst, err := exportSkillFile(p, e)
+		if err != nil {
+			return err
+		}
+		if dst == "" {
+			return fmt.Errorf("%s has no SKILL.md to export", e.Name)
+		}
+		fmt.Printf("exported skill: %s\n", dst)
+		return nil
+	case "remove":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: smith skill remove <name>")
+		}
+		removeExportedSkill(p, args[1])
+		return nil
+	default:
+		return fmt.Errorf("unknown skill subcommand %q (list|export|remove)", args[0])
+	}
 }
 
 // removeExportedSkill deletes a tool's exported skill dir (called on demote so
