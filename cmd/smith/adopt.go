@@ -293,10 +293,34 @@ func cmdInstall(p config.Paths, args []string) error {
 	if err := exec.Command("mise", "trust").Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "[smith] note: `mise trust` failed; run it in this dir")
 	}
+
+	// Adopted tools are trusted for this project, so export their SKILL.md so
+	// agent sessions discover them (config skills.export: always|never).
+	fc, _ := p.LoadFileConfig()
+	if fc.Skills.Export != "never" {
+		for _, name := range names {
+			src := filepath.Join(smithDir, "tools", name, "SKILL.md")
+			if _, err := os.Stat(src); err != nil {
+				continue
+			}
+			dst := filepath.Join(fc.SkillsDir(), name, "SKILL.md")
+			if err := copyPlain(src, dst); err != nil {
+				fmt.Fprintf(os.Stderr, "[smith] skill export failed for %s: %v\n", name, err)
+			}
+		}
+	}
+
 	fmt.Printf("installed %d tool(s) on PATH for this project (via %s)\n", len(names), binDir)
 	fmt.Printf("  %s\n", strings.Join(names, ", "))
 	fmt.Println("activation needs mise in your shell (`mise activate`) or `mise exec`")
 	return nil
+}
+
+// jsonPrint writes v as indented JSON to stdout.
+func jsonPrint(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 func ensureProjectGitignore() {

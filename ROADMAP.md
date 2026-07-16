@@ -1,5 +1,31 @@
 # Roadmap
 
+## v2.0 — tool-as-repo (current model)
+
+**The personal signed index is retired.** A tool is now a **git repo**,
+adopted per project via a reviewed commit (`smith use` → `.smith/tools.yaml` +
+vendored source; `smith install` → project PATH). Trust is per-project; the
+PR review is the gate. Commands: `new`, `use`, `install`, `search`, `review`,
+`list`. `calc` and `det-canary` migrated to standalone tool repos.
+
+Deleted: the index/publish/fetch/sync/gc/key/promote/demote/add/register/
+upgrade commands and the internal index/sign/transport/provenance/attest/
+misex/store packages.
+
+**Next for v2:**
+- `smith use` for compiled/deps runtimes (go build / python-uv warm at adopt).
+- Real GitHub tool repos + the `smith-tool` topic so `smith search` returns
+  results (publish `calc`/`det-canary` as public/org repos).
+- Optional signed **allowlist** (which repos an org permits adopting) — a
+  policy layer reusing the ed25519 signing approach from the retired index.
+- `smith use --ref <branch>` / update flow (re-`use` at a new version).
+- Sandbox v2 (macOS microVM / Linux Landlock) for restricted hosts.
+
+The sections below are **historical** — the v0.2–v1.0 work on the (now
+retired) personal-index model. Kept for context; superseded by v2.0.
+
+---
+
 Spec Phases 0–3 shipped (see README). This plans what comes after, informed
 by gaps found while building and by ecosystem investigation (July 2026).
 Versions are themes, not promises; order within a release is by risk.

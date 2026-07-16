@@ -13,25 +13,24 @@ mise exec -- go build -o "$SM" ./cmd/smith
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 export SMITH_HOME="$work/home"
+export SMITH_SKILLS_DIR="$work/skills"   # isolate: don't touch the real ~/.claude/skills
 say() { printf '\n== %s ==\n' "$*"; }
 gitq() { git -c user.email=t@t -c user.name=t "$@"; }
 
 say "author greet, then make it its own tool repo (tagged, topic smith-tool)"
-"$SM" new greet --runtime bash --desc "print a greeting" >/dev/null 2>&1
-d="$SMITH_HOME/drafts/greet"
-python3 - "$d/greet" <<'PY'
+repo="$work/greet"
+( cd "$work" && "$SM" new greet --runtime bash --desc "print a greeting" >/dev/null 2>&1 )
+python3 - "$repo/greet" <<'PY'
 import re,sys
 p=sys.argv[1]; s=open(p).read()
 s=re.sub(r'main\(\) \{.*?\n\}', 'main() {\n  local who="${args[0]:-world}"\n  emit "{\\"hello\\":\\"$who\\"}" "hello, $who"\n}', s, flags=re.S)
 open(p,'w').write(s)
 PY
-python3 - "$d/selftest.sh" <<'PY'
+python3 - "$repo/selftest.sh" <<'PY'
 import sys
 p=sys.argv[1]; s=open(p).read(); m="# --- operation-specific assertions"
 open(p,'w').write(s[:s.index(m)]+m+'\n[[ "$("$TOOL" --json alice)" == \'{"hello":"alice"}\' ]] || fail "wrong greeting"\n\necho "selftest: ok"\n')
 PY
-repo="$work/greet-repo"; mkdir -p "$repo"
-cp "$d"/greet "$d"/selftest.sh "$d"/SKILL.md "$d"/manifest.yaml "$repo"/
 ( cd "$repo" && git init -q && gitq add -A && gitq commit -qm "greet v0.1.0" && git tag v0.1.0 )
 
 say "in a project: smith use (self-test sandboxed, vendor, pin) — a reviewable diff"

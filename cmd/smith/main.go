@@ -1,36 +1,30 @@
-// smith — thin convention + trust gate over mise (see toolsmith-spec.md).
+// smith — agent tools as git repos, adopted per project behind a trust gate.
 //
-// Phase 0 surface: init, add, list/status, run, promote (minimal), demote,
-// verify. `new` and `publish` arrive in Phases 1–2.
+// A tool is a git repo (source + manifest + selftest + SKILL.md). You author
+// one with `smith new`, discover others with `smith search`, and adopt one
+// into a project with `smith use` — which vendors its source under .smith/ and
+// pins it, a reviewable commit like any dependency. `smith install` realizes
+// that lockfile onto the project's PATH. Adoption (the PR) is the trust gate;
+// until then a tool only runs sandboxed.
 package main
 
 import (
-	"bufio"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
-	"syscall"
-	"time"
 
 	"golang.org/x/term"
 
-	"smith/internal/attest"
 	"smith/internal/config"
-	"smith/internal/index"
-	"smith/internal/misex"
-	"smith/internal/provenance"
 	"smith/internal/reviewtui"
 	"smith/internal/sandbox"
 	"smith/internal/scaffold"
-	"smith/internal/sign"
-	"smith/internal/store"
-	"smith/internal/transport"
 )
 
 // version is set at build time via -ldflags "-X main.version=..." (see Makefile).
@@ -51,46 +45,18 @@ func main() {
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	switch cmd {
-	case "init":
-		err = cmdInit(paths, args)
-	case "add":
-		err = cmdAdd(paths, args)
-	case "list", "status":
-		err = cmdList(paths, args)
-	case "run":
-		err = cmdRun(paths, args)
-	case "review":
-		err = cmdReview(paths, args)
-	case "promote":
-		err = cmdPromote(paths, args)
-	case "demote":
-		err = cmdDemote(paths, args)
-	case "verify":
-		err = cmdVerify(paths, args)
 	case "new":
 		err = cmdNew(paths, args)
-	case "upgrade":
-		err = cmdUpgrade(paths, args)
-	case "register":
-		err = cmdRegister(paths, args)
-	case "publish":
-		err = cmdPublish(paths, args)
-	case "key":
-		err = cmdKey(paths, args)
-	case "skill":
-		err = cmdSkill(paths, args)
 	case "use":
 		err = cmdUse(paths, args)
 	case "install":
 		err = cmdInstall(paths, args)
 	case "search":
 		err = cmdSearch(paths, args)
-	case "fetch":
-		err = cmdFetch(paths, args)
-	case "sync":
-		err = cmdSync(paths, args)
-	case "gc":
-		err = cmdGC(paths, args)
+	case "review":
+		err = cmdReview(paths, args)
+	case "list", "status":
+		err = cmdList(paths, args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -109,42 +75,30 @@ func fatal(err error) {
 }
 
 func usage() {
-	fmt.Print(`smith — agent tool store with a trust gate (thin wrapper over mise)
+	fmt.Print(`smith — agent tools as git repos, adopted per project behind a trust gate
 
 Usage:
-  smith init                        set up SMITH_HOME + activate trusted store on PATH here
-  smith add <name>[@<version>]      install external tool via mise -> Tier 2 quarantine
-  smith list [--json]               list tools with version, tier, origin
-  smith status [--json]             alias of list
-  smith run <name>[@<ver>] [args]   run a tool (Tier 0/2 forced into sandbox)
-  smith review <name>[@<ver>] [--plain|--edit|--paths] [--editor <cmd>]   interactive source review (TUI); comment lines -> agent report
-  smith promote <name>[@<ver>]      human-gated: quarantine -> trusted (Tier 1, on PATH)
-  smith demote <name>[@<ver>] --reason <why>   trusted -> quarantine, off PATH now
-  smith verify [--json]             re-check sha256 pins + provenance chain + PATH hygiene
-  smith new <name> [--runtime bash|python] [--desc <text>]
-                                    scaffold an agent-friendly CLI draft (cli-creator)
+  smith new <name> [--runtime bash|python|go|python-uv] [--desc <text>]
+                                 scaffold a tool (a future git repo)
+  smith search [query]           discover tool repos (GitHub topic: smith-tool)
+  smith use <repo|path>[@<ver>]  adopt a tool into this project: sandboxed
+                                 self-test, vendor into .smith/tools/, pin in
+                                 .smith/tools.yaml (a reviewable commit)
+  smith review <repo|path|name> [--plain|--edit|--paths] [--editor <cmd>]
+                                 read a tool's source (interactive TUI) before adopting
+  smith install                  realize .smith/tools.yaml onto the project PATH
+  smith list                     list tools adopted in this project
+  smith version                  print version
 
-  -- v2 (tool-as-repo, adopt per project) --
-  smith use <repo|path>[@<ver>]     adopt a tool repo into this project (vendored + pinned in .smith/tools.yaml)
-  smith install                     realize .smith/tools.yaml onto this project's PATH
-  smith search [query]              discover tool repos by the smith-tool GitHub topic
-  smith upgrade <name> [--version X]   new version: authored -> seed a draft from the trusted source; external -> add newer
-  smith register <name>             sandbox-run the draft's self-test; pass -> Tier 0 + promotion request
-  smith publish                     sign the manifest set + commit/push the index repo
-  smith key list|rotate|add <pub>|revoke <fprint>   manage signing keys (multi-key + rotation)
-  smith skill list|export <name>|remove <name>      manage exported discovery skills for promoted tools
-  smith fetch <name>[@<ver>]        install a tool on this machine from the index (checksum + signature verified)
-  smith sync                        pull the index repo + reconcile: tools demoted upstream come off PATH now
-  smith gc [--older-than 30d] [--yes]  remove unpromoted Tier 0 versions + stale drafts (dry-run unless --yes)
-
-Tiers: 0 = authored (quarantined)  1 = trusted (PATH)  2 = external (quarantined)
-SMITH_HOME: ` + defaultHomeHint() + `
+Trust is per-project: a tool vendored + pinned in the reviewed .smith/tools.yaml
+is trusted for that project (on PATH via mise). Until adopted, tools run only
+sandboxed. SMITH_HOME (` + defaultHomeHint() + `) holds generated sandbox profiles + config.yaml.
 `)
 }
 
 func defaultHomeHint() string {
 	if h := os.Getenv("SMITH_HOME"); h != "" {
-		return h + " (from $SMITH_HOME)"
+		return h
 	}
 	return "~/.toolsmith"
 }
@@ -156,762 +110,7 @@ func splitSpec(s string) (name, version string) {
 	return s, ""
 }
 
-// miseToGoPlatform maps a mise platform name (config `platforms:`, e.g.
-// "macos-arm64", "linux-x64") to smith's index platform key (GOOS-GOARCH,
-// e.g. "darwin-arm64", "linux-amd64"), so stub entries land where a fetching
-// machine's index.CurrentPlatform() will look for them.
-func miseToGoPlatform(mp string) string {
-	os_, arch, ok := strings.Cut(mp, "-")
-	if !ok {
-		return mp
-	}
-	switch os_ {
-	case "macos":
-		os_ = "darwin"
-	}
-	switch arch {
-	case "x64", "x86_64", "amd64":
-		arch = "amd64"
-	case "aarch64":
-		arch = "arm64"
-	}
-	return os_ + "-" + arch
-}
-
-// ---------------------------------------------------------------- init
-
-func cmdInit(p config.Paths, args []string) error {
-	if err := p.EnsureLayout(); err != nil {
-		return err
-	}
-	if _, err := sandbox.WriteDefaultProfile(p.SandboxProfiles); err != nil {
-		return err
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	if err := ensureActivation(cwd, p.TrustedBin); err != nil {
-		return err
-	}
-	if err := misex.Trust(cwd); err != nil {
-		return fmt.Errorf("mise trust failed: %w", err)
-	}
-	// SMITH_HOME is the index repo; make it one so publish can commit/push.
-	if _, err := os.Stat(filepath.Join(p.Home, ".git")); os.IsNotExist(err) {
-		if err := gitInHome(p, "init", "-q"); err != nil {
-			fmt.Fprintln(os.Stderr, "[smith] warning: could not git-init SMITH_HOME; `smith publish` needs it")
-		}
-	}
-	// Verify the two PATH invariants (§5.1) against what mise will activate.
-	envPath, err := misex.EnvPath(cwd)
-	if err != nil {
-		return err
-	}
-	if !pathContains(envPath, p.TrustedBin) {
-		return fmt.Errorf("activation check failed: %s not on mise-activated PATH", p.TrustedBin)
-	}
-	if pathTouchesQuarantine(envPath, p.StoreQuarantine) {
-		return fmt.Errorf("INVARIANT VIOLATION: quarantine dir is on the activated PATH")
-	}
-	fmt.Printf("initialized: SMITH_HOME=%s\n", p.Home)
-	fmt.Printf("trusted store on PATH:  %s\n", p.TrustedBin)
-	fmt.Printf("quarantine off PATH:    %s (verified)\n", p.StoreQuarantine)
-	fmt.Println("note: activation requires mise in your shell (`mise activate`) or `mise exec`")
-	return nil
-}
-
-// ensureActivation adds env._.path = [trustedBin] via mise.local.toml, which
-// mise merges with mise.toml. Handles the common shapes; refuses to guess on
-// anything exotic rather than corrupting user config.
-func ensureActivation(projectDir, trustedBin string) error {
-	path := filepath.Join(projectDir, "mise.local.toml")
-	pathLine := fmt.Sprintf("_.path = [%q]", trustedBin)
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		content := "# managed by smith: puts the Toolsmith trusted store on PATH\n[env]\n" + pathLine + "\n"
-		return os.WriteFile(path, []byte(content), 0o644)
-	}
-	if err != nil {
-		return err
-	}
-	text := string(raw)
-	if strings.Contains(text, trustedBin) {
-		return nil // already activated
-	}
-	if strings.Contains(text, "_.path") {
-		return fmt.Errorf("mise.local.toml already sets env._.path; add %q to it manually", trustedBin)
-	}
-	if i := strings.Index(text, "[env]"); i >= 0 {
-		insertAt := i + len("[env]")
-		text = text[:insertAt] + "\n" + pathLine + text[insertAt:]
-	} else {
-		if !strings.HasSuffix(text, "\n") && text != "" {
-			text += "\n"
-		}
-		text += "\n[env]\n" + pathLine + "\n"
-	}
-	return os.WriteFile(path, []byte(text), 0o644)
-}
-
-func pathContains(pathVar, dir string) bool {
-	for _, p := range filepath.SplitList(pathVar) {
-		if p == dir {
-			return true
-		}
-	}
-	return false
-}
-
-func pathTouchesQuarantine(pathVar, quarantine string) bool {
-	prefix := quarantine + string(filepath.Separator)
-	for _, p := range filepath.SplitList(pathVar) {
-		if p == quarantine || strings.HasPrefix(p, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// ---------------------------------------------------------------- add
-
-func cmdAdd(p config.Paths, args []string) error {
-	fs := flag.NewFlagSet("add", flag.ContinueOnError)
-	allowUnverified := fs.Bool("allow-unverified", false,
-		"accept a source with no attestation and no curated-registry checksums (TOFU pin only)")
-	var spec0 string
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		spec0, args = args[0], args[1:]
-	}
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if spec0 == "" && fs.NArg() == 1 {
-		spec0 = fs.Arg(0)
-	}
-	if spec0 == "" {
-		return fmt.Errorf("usage: smith add <name>[@<version>] [--allow-unverified]")
-	}
-	if err := p.EnsureLayout(); err != nil {
-		return err
-	}
-	name, version := splitSpec(spec0)
-
-	// Verification policy (§8 Phase 3): attestation when the source offers
-	// it, curated-registry checksums as baseline, TOFU only with explicit
-	// operator consent — decided BEFORE any resolution or download.
-	backend := misex.Registry(name)
-	level := attest.BackendLevel(backend)
-	if level == attest.LevelTOFU && !*allowUnverified {
-		return fmt.Errorf("%s resolves via %q: no attestation and no curated checksum registry.\n"+
-			"Refusing (§7). To pin trust-on-first-use anyway: smith add %s --allow-unverified", name, backend, spec0)
-	}
-
-	if version == "" {
-		v, err := misex.Latest(name)
-		if err != nil || v == "" {
-			return fmt.Errorf("could not resolve latest version for %q via mise: %v", name, err)
-		}
-		version = v
-	}
-	spec := name + "@" + version
-	if _, err := index.Load(p.IndexTools, name, version); err == nil {
-		return fmt.Errorf("%s already in index; `smith list` to inspect", spec)
-	}
-
-	fmt.Fprintf(os.Stderr, "resolving %s via mise (backend checksum verification applies)...\n", spec)
-	if err := misex.Install(spec); err != nil {
-		return fmt.Errorf("mise install failed — tool is NOT registered: %w", err)
-	}
-	verification := level
-	if repo := attest.GitHubRepo(backend); repo != "" {
-		if dlDir, err := misex.DownloadsDir(spec); err == nil {
-			if res, ok := attest.VerifyArchives(dlDir, repo); ok {
-				verification = res.Level
-				fmt.Fprintf(os.Stderr, "[smith] attestation verified: %s (%s)\n", res.Detail, res.PredicateType)
-			} else {
-				fmt.Fprintf(os.Stderr, "[smith] no attestations for %s archives; verification level: %s\n", repo, level)
-			}
-		}
-	}
-	// mise's backend knows where the executables are inside the archive
-	// (bin/, nested release dir, ...); ask it rather than guessing.
-	binDirs, err := misex.BinPaths(spec)
-	if err != nil || len(binDirs) == 0 {
-		src, werr := misex.Where(spec)
-		if werr != nil {
-			return werr
-		}
-		binDirs = []string{src}
-		if st, serr := os.Stat(filepath.Join(src, "bin")); serr == nil && st.IsDir() {
-			binDirs = []string{filepath.Join(src, "bin")}
-		}
-	}
-	qdir := store.QuarantineDir(p.StoreQuarantine, name, version)
-	var names []string
-	for _, d := range binDirs {
-		copied, err := store.CopyExecutables(d, filepath.Join(qdir, "bin"))
-		if err != nil {
-			return err
-		}
-		names = append(names, copied...)
-	}
-	if len(names) == 0 {
-		os.RemoveAll(qdir)
-		return fmt.Errorf("no executables found in %s; not registering", strings.Join(binDirs, ", "))
-	}
-	var artifacts []index.Artifact
-	for _, n := range names {
-		sum, err := store.HashFile(filepath.Join(qdir, "bin", n))
-		if err != nil {
-			return err
-		}
-		artifacts = append(artifacts, index.Artifact{Path: filepath.Join("bin", n), Sha256: sum})
-	}
-	e := index.Entry{
-		Name: name, Version: version, Platform: index.CurrentPlatform(), Tier: 2,
-		Origin: "external", Source: "mise:" + spec,
-		AddedAt:      nowUTC(),
-		Artifacts:    artifacts,
-		Verification: verification,
-	}
-	if err := index.Save(p.IndexTools, e); err != nil {
-		return err
-	}
-	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
-		Event: "add", Tool: name, Version: version,
-		TierTo: provenance.Tier(2), Actor: config.Actor(), Origin: e.Source,
-		Verification: verification,
-	}); err != nil {
-		return err
-	}
-
-	// Capture a signed cross-platform checksum record (mise.lock) so the
-	// index carries integrity metadata for every configured platform, not
-	// just this machine's. Best-effort: the tool is already registered with
-	// smith's own pin; a lock failure is a warning, not a rollback.
-	fc, _ := p.LoadFileConfig()
-	lockPath := filepath.Join(p.IndexTools, name, version, "mise.lock")
-	if err := misex.Lock(spec, lockPath, fc.Platforms); err != nil {
-		fmt.Fprintf(os.Stderr, "[smith] warning: could not lock cross-platform checksums: %v\n", err)
-	} else {
-		plats := fc.Platforms
-		if len(plats) == 0 {
-			plats = []string{"this platform"}
-		}
-		fmt.Fprintf(os.Stderr, "[smith] locked checksums for: %s (index/tools/%s/%s/mise.lock)\n",
-			strings.Join(plats, ", "), name, version)
-		// Mark this entry locked and publish metadata-only stubs for the
-		// other configured platforms, so a fetch-only machine on any of them
-		// can find and materialize the tool from the signed lockfile.
-		e.Locked = true
-		if err := index.Save(p.IndexTools, e); err != nil {
-			return err
-		}
-		cur := index.CurrentPlatform()
-		var stubbed []string
-		for _, mp := range fc.Platforms {
-			gp := miseToGoPlatform(mp)
-			if gp == cur {
-				continue
-			}
-			stub := index.Entry{
-				Name: name, Version: version, Platform: gp, Tier: 2,
-				Origin: "external", Source: "mise:" + spec,
-				AddedAt: e.AddedAt, Verification: verification, Locked: true,
-			}
-			if err := index.Save(p.IndexTools, stub); err != nil {
-				return err
-			}
-			stubbed = append(stubbed, gp)
-		}
-		if len(stubbed) > 0 {
-			fmt.Fprintf(os.Stderr, "[smith] cross-platform stubs: %s (fetchable via `smith fetch %s` there)\n",
-				strings.Join(stubbed, ", "), name)
-		}
-	}
-
-	fmt.Printf("added %s at Tier 2 (external quarantine)\n", spec)
-	fmt.Printf("  store: %s\n", qdir)
-	fmt.Printf("  verification: %s\n", verification)
-	for _, a := range artifacts {
-		fmt.Printf("  %s  sha256=%s\n", a.Path, a.Sha256)
-	}
-	fmt.Printf("run sandboxed:  smith run %s [args]\n", name)
-	fmt.Printf("trust it:       smith promote %s   (interactive, human only)\n", spec)
-	return nil
-}
-
-func nowUTC() string {
-	return time.Now().UTC().Format(time.RFC3339)
-}
-
-// ---------------------------------------------------------------- new / register
-
-func draftDir(p config.Paths, name string) string {
-	return filepath.Join(p.Home, "drafts", name)
-}
-
-func cmdNew(p config.Paths, args []string) error {
-	fs := flag.NewFlagSet("new", flag.ContinueOnError)
-	runtime := fs.String("runtime", "bash", "tool runtime: bash | python (stdlib)")
-	desc := fs.String("desc", "", "one-line description (becomes SKILL.md trigger stub)")
-	var name string
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		name, args = args[0], args[1:]
-	}
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if name == "" && fs.NArg() == 1 {
-		name = fs.Arg(0)
-	}
-	if name == "" {
-		return fmt.Errorf("usage: smith new <name> [--runtime bash|python] [--desc <text>]")
-	}
-	if strings.ContainsAny(name, "/@ ") {
-		return fmt.Errorf("tool name must be a plain identifier (no /, @, spaces)")
-	}
-	if err := p.EnsureLayout(); err != nil {
-		return err
-	}
-	d := *desc
-	if d == "" {
-		d = "TODO: describe " + name
-	}
-	dir := draftDir(p, name)
-	if err := scaffold.Create(dir, scaffold.Manifest{
-		Name: name, Version: "0.1.0", Description: d, Runtime: *runtime,
-	}); err != nil {
-		return err
-	}
-	fmt.Printf("draft scaffolded: %s\n", dir)
-	fmt.Printf(`next steps (cli-creator flow):
-  1. implement %s/%s (keep --json/--quiet/--help contract)
-  2. replace the TODO block in selftest.sh with real assertions
-  3. sharpen the trigger description in SKILL.md
-  4. smith register %s   (runs the self-test sandboxed; pass -> Tier 0)
-`, dir, name, name)
-	return nil
-}
-
-// cmdUpgrade starts a new version of an existing tool. For an authored tool
-// it seeds the draft from the trusted source at a bumped version (edit, then
-// `smith register`). For an external tool it adds the newer version (which
-// lands at Tier 2 for its own review); the old version stays until demoted.
-func cmdUpgrade(p config.Paths, args []string) error {
-	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
-	version := fs.String("version", "", "target version (default: patch-bump for authored, mise latest for external)")
-	var name string
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		name, args = args[0], args[1:]
-	}
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if name == "" && fs.NArg() == 1 {
-		name = fs.Arg(0)
-	}
-	if name == "" {
-		return fmt.Errorf("usage: smith upgrade <name> [--version X]")
-	}
-	e, err := index.Resolve(p.IndexTools, name, "")
-	if err != nil {
-		return err
-	}
-
-	// External tool: adding the newer version reuses the full add pipeline
-	// (verify + lock + stubs + provenance); it lands at Tier 2 for review.
-	if strings.HasPrefix(e.Source, "mise:") {
-		target := *version
-		if target == "" {
-			v, err := misex.Latest(name)
-			if err != nil || v == "" {
-				return fmt.Errorf("could not resolve latest for %q via mise: %v", name, err)
-			}
-			target = v
-		}
-		if target == e.Version {
-			fmt.Printf("%s is already at %s (highest in index)\n", name, target)
-			return nil
-		}
-		fmt.Fprintf(os.Stderr, "[smith] upgrading external %s: %s -> %s\n", name, e.Version, target)
-		if err := cmdAdd(p, []string{name + "@" + target}); err != nil {
-			return err
-		}
-		fmt.Printf("\nold version %s@%s remains until you `smith demote` it\n", name, e.Version)
-		return nil
-	}
-
-	// Authored tool: seed the draft from the trusted/quarantined source at a
-	// bumped version.
-	target := *version
-	if target == "" {
-		bumped, err := bumpPatch(e.Version)
-		if err != nil {
-			return fmt.Errorf("cannot auto-bump %q: %v; pass --version", e.Version, err)
-		}
-		target = bumped
-	}
-	if _, err := index.Load(p.IndexTools, name, target); err == nil {
-		return fmt.Errorf("%s@%s already exists in the index; pick another --version", name, target)
-	}
-	base := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-	if e.Tier == 1 {
-		base = store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
-	}
-	m, err := scaffold.LoadManifest(base) // manifest.yaml rides in the bundle
-	if err != nil {
-		return fmt.Errorf("reading source manifest from %s: %w", base, err)
-	}
-	dir := draftDir(p, name)
-	if err := os.RemoveAll(dir); err != nil { // reseed from the trusted source
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	// Copy source bundle -> draft: entrypoint + selftest (from bin/), docs.
-	for _, f := range []struct {
-		src, dst string
-		mode     os.FileMode
-	}{
-		{filepath.Join("bin", m.Entrypoint), m.Entrypoint, 0o755},
-		{filepath.Join("bin", "selftest.sh"), "selftest.sh", 0o755},
-		{"SKILL.md", "SKILL.md", 0o644},
-	} {
-		raw, err := os.ReadFile(filepath.Join(base, f.src))
-		if err != nil {
-			continue // selftest/SKILL optional
-		}
-		if err := os.WriteFile(filepath.Join(dir, f.dst), raw, f.mode); err != nil {
-			return err
-		}
-	}
-	m.Version = target
-	if err := scaffold.SaveManifest(dir, m); err != nil {
-		return err
-	}
-	fmt.Printf("seeded draft %s from %s@%s (tier %d), bumped to %s\n", dir, name, e.Version, e.Tier, target)
-	fmt.Printf(`next steps:
-  1. edit %s/%s (and selftest.sh / SKILL.md)
-  2. smith register %s   (self-test sandboxed; pass -> Tier 0 @ %s)
-  3. smith review %s && smith promote %s@%s
-`, dir, m.Entrypoint, name, target, name, name, target)
-	return nil
-}
-
-// bumpPatch increments the last dotted-numeric segment of a version.
-func bumpPatch(v string) (string, error) {
-	parts := strings.Split(v, ".")
-	last := parts[len(parts)-1]
-	n, err := strconv.Atoi(last)
-	if err != nil {
-		return "", fmt.Errorf("last segment %q is not numeric", last)
-	}
-	parts[len(parts)-1] = strconv.Itoa(n + 1)
-	return strings.Join(parts, "."), nil
-}
-
-func cmdRegister(p config.Paths, args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("usage: smith register <name>")
-	}
-	name := args[0]
-	dir := draftDir(p, name)
-	m, err := scaffold.LoadManifest(dir)
-	if err != nil {
-		return err
-	}
-	if m.Name != name {
-		return fmt.Errorf("manifest name %q does not match draft %q", m.Name, name)
-	}
-	if _, err := index.Load(p.IndexTools, m.Name, m.Version); err == nil {
-		return fmt.Errorf("%s@%s already registered; bump version in %s/manifest.yaml", m.Name, m.Version, dir)
-	}
-	if m.Runtime == "python-uv" {
-		return registerPythonUV(p, dir, m)
-	}
-	// Compiled runtimes build the entrypoint from source first. The Go
-	// toolchain runs unsandboxed here (it is trusted), offline (GOPROXY=off);
-	// promotion review reads main.go, so `//go:embed`/cgo are visible.
-	platform := index.PlatformAny
-	if m.Runtime == "go" {
-		if err := buildGoTool(dir, m.Entrypoint); err != nil {
-			return fmt.Errorf("go build failed — not registered: %w", err)
-		}
-		platform = index.CurrentPlatform() // compiled binary is platform-specific
-	}
-	entry := filepath.Join(dir, m.Entrypoint)
-	if err := os.Chmod(entry, 0o755); err != nil {
-		return fmt.Errorf("entrypoint %s: %w", entry, err)
-	}
-
-	// Self-test runs INSIDE the sandbox: it is executing unreviewed Tier-0
-	// code. Failure blocks registration (§8 Phase 1).
-	if err := runSelfTest(p, dir, entry); err != nil {
-		return fmt.Errorf("self-test FAILED — not registered: %w", err)
-	}
-
-	// Copy the full review bundle into quarantine: the executable plus the
-	// pinned docs a promotion review needs (source == executable for these
-	// runtimes; selftest + manifest + SKILL.md ride along, hashed).
-	qdir := store.QuarantineDir(p.StoreQuarantine, m.Name, m.Version)
-	if _, err := os.Stat(qdir); err == nil {
-		return fmt.Errorf("quarantine dir already exists: %s", qdir)
-	}
-	if _, err := store.CopyExecutables(dir, filepath.Join(qdir, "bin")); err != nil {
-		return err
-	}
-	e := index.Entry{
-		Name: m.Name, Version: m.Version, Platform: platform, Tier: 0,
-		Origin: "authored:" + config.Actor(), Source: "local:" + dir,
-		AddedAt: nowUTC(),
-	}
-	binArt, err := pinFile(qdir, filepath.Join("bin", m.Entrypoint))
-	if err != nil {
-		return err
-	}
-	e.Artifacts = []index.Artifact{binArt}
-	// For compiled tools the binary isn't human-readable; pin the source so
-	// review reads what was built, not just the artifact.
-	docList := []string{"SKILL.md", "manifest.yaml"}
-	if m.Runtime == "go" {
-		docList = append(docList, "main.go")
-	}
-	for _, doc := range docList {
-		src := filepath.Join(dir, doc)
-		if _, err := os.Stat(src); err != nil {
-			continue
-		}
-		if err := copyPlain(src, filepath.Join(qdir, doc)); err != nil {
-			return err
-		}
-		a, err := pinFile(qdir, doc)
-		if err != nil {
-			return err
-		}
-		e.Docs = append(e.Docs, a)
-	}
-	// selftest.sh was copied by CopyExecutables (it is executable); pin it as
-	// a doc so review sees exactly what was tested, but never symlink it.
-	if _, err := os.Stat(filepath.Join(qdir, "bin", "selftest.sh")); err == nil {
-		a, err := pinFile(qdir, filepath.Join("bin", "selftest.sh"))
-		if err != nil {
-			return err
-		}
-		e.Docs = append(e.Docs, a)
-	}
-	if err := index.Save(p.IndexTools, e); err != nil {
-		return err
-	}
-	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
-		Event: "author", Tool: m.Name, Version: m.Version,
-		TierTo: provenance.Tier(0), Actor: config.Actor(),
-		Origin: e.Source, SelfTest: "pass",
-	}); err != nil {
-		return err
-	}
-	fmt.Printf("registered %s@%s at Tier 0 (authored, quarantined)\n", m.Name, m.Version)
-	fmt.Printf("  store: %s\n  %s  sha256=%s\n", qdir, binArt.Path, binArt.Sha256)
-	fmt.Printf(`
-PROMOTION REQUEST — human action required
-  tool:    %s@%s (Tier 0)
-  review:  read %s and its selftest.sh — the self-test passed but was
-           authored by the same agent that wrote the tool (§7)
-  approve: smith promote %s@%s   (interactive terminal only)
-until then: runnable only via `+"`smith run %s`"+` (sandboxed)
-`, m.Name, m.Version, filepath.Join(qdir, "bin", m.Entrypoint), m.Name, m.Version, m.Name)
-	return nil
-}
-
-// buildGoTool compiles dir/main.go into dir/<out>, offline (GOPROXY=off) and
-// without cgo. The Go toolchain is trusted, but review still reads main.go.
-func buildGoTool(dir, out string) error {
-	if _, err := exec.LookPath("go"); err != nil {
-		return fmt.Errorf("go toolchain not found on PATH")
-	}
-	cmd := exec.Command("go", "build", "-trimpath", "-o", out, "main.go")
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOPROXY=off", "GOFLAGS=-mod=mod")
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-	return cmd.Run()
-}
-
-// pythonUVLauncher is the entrypoint for a python-uv tool. It resolves its
-// real location (following the Tier-1 PATH symlink), mirrors the tool-local
-// uv cache to a writable temp (the store cache is read-only under the
-// sandbox, and uv writes to its cache at run), and runs the script offline.
-func pythonUVLauncher(srcFile string) string {
-	return `#!/bin/bash
-set -e
-target="$0"
-while [ -L "$target" ]; do
-  link="$(readlink "$target")"
-  case "$link" in /*) target="$link";; *) target="$(dirname "$target")/$link";; esac
-done
-here="$(cd "$(dirname "$target")" && pwd)"
-cache="$(mktemp -d)/cache"
-cp -R "$here/uv-cache" "$cache"
-export UV_CACHE_DIR="$cache"
-exec uv run --offline --script "$here/` + srcFile + `" "$@"
-`
-}
-
-// warmUVCache populates the tool-local uv cache by resolving+installing the
-// script's locked deps. It runs in a NETWORK-allowed sandbox with a sanitized
-// env and writes confined to the draft dir — so this one step, which touches
-// PyPI and runs unreviewed dep code to build the env, can't reach secrets or
-// the wider filesystem.
-func warmUVCache(p config.Paths, dir, srcPath string) error {
-	argv, err := sandbox.Command(p.SandboxProfiles, dir, sandbox.Perms{Network: true},
-		[]string{"uv", "run", "--script", srcPath, "--version"})
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = dir
-	env, err := sandbox.Env(nil)
-	if err != nil {
-		return err
-	}
-	cmd.Env = append(env, "UV_CACHE_DIR="+filepath.Join(dir, "uv-cache"))
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-	return cmd.Run()
-}
-
-// registerPythonUV locks a PEP 723 script's deps (with hashes), generates the
-// uv launcher, warms a tool-local cache, self-tests offline, and bundles it
-// flat (launcher + script + lock + cache as siblings) so the launcher resolves
-// identically in the draft, the store, and on the Tier-1 PATH. python-uv
-// tools are platform-specific (the cache holds platform wheels).
-func registerPythonUV(p config.Paths, dir string, m scaffold.Manifest) error {
-	if _, err := exec.LookPath("uv"); err != nil {
-		return fmt.Errorf("uv not found on PATH (required for python-uv tools)")
-	}
-	src := m.Name + ".py"
-	srcPath := filepath.Join(dir, src)
-	if _, err := os.Stat(srcPath); err != nil {
-		return fmt.Errorf("source %s missing in draft", src)
-	}
-	// 1. Lock deps with hashes (reproducible; the review surface).
-	lock := exec.Command("uv", "lock", "--script", srcPath)
-	lock.Stdout, lock.Stderr = os.Stderr, os.Stderr
-	if err := lock.Run(); err != nil {
-		return fmt.Errorf("uv lock failed — not registered: %w", err)
-	}
-	// 2. Launcher.
-	if err := os.WriteFile(filepath.Join(dir, m.Entrypoint), []byte(pythonUVLauncher(src)), 0o755); err != nil {
-		return err
-	}
-	// 3. Warm the tool-local cache (network-sandboxed).
-	if err := warmUVCache(p, dir, srcPath); err != nil {
-		return fmt.Errorf("warming uv cache failed — not registered: %w", err)
-	}
-	// 4. Self-test offline (strict sandbox) through the launcher.
-	if err := runSelfTest(p, dir, filepath.Join(dir, m.Entrypoint)); err != nil {
-		return fmt.Errorf("self-test FAILED — not registered: %w", err)
-	}
-	// 5. Flat bundle: launcher + selftest (executables) at the top, then the
-	// script/lock/docs and the cache tree, so the launcher's siblings match.
-	qdir := store.QuarantineDir(p.StoreQuarantine, m.Name, m.Version)
-	if _, err := os.Stat(qdir); err == nil {
-		return fmt.Errorf("quarantine dir already exists: %s", qdir)
-	}
-	if _, err := store.CopyExecutables(dir, qdir); err != nil { // launcher + selftest.sh -> qdir/
-		return err
-	}
-	// cp -R handles the uv cache's symlinks/permissions natively.
-	if err := os.MkdirAll(qdir, 0o755); err != nil {
-		return err
-	}
-	cp := exec.Command("cp", "-R", filepath.Join(dir, "uv-cache"), filepath.Join(qdir, "uv-cache"))
-	cp.Stderr = os.Stderr
-	if err := cp.Run(); err != nil {
-		return fmt.Errorf("copying uv cache: %w", err)
-	}
-	e := index.Entry{
-		Name: m.Name, Version: m.Version, Platform: index.CurrentPlatform(), Tier: 0,
-		Origin: "authored:" + config.Actor(), Source: "local:" + dir,
-		AddedAt: nowUTC(),
-	}
-	binArt, err := pinFile(qdir, m.Entrypoint)
-	if err != nil {
-		return err
-	}
-	e.Artifacts = []index.Artifact{binArt}
-	for _, doc := range []string{"SKILL.md", "manifest.yaml", src, src + ".lock", "selftest.sh"} {
-		srcp := filepath.Join(dir, doc)
-		if _, err := os.Stat(srcp); err != nil {
-			continue
-		}
-		if err := copyPlain(srcp, filepath.Join(qdir, doc)); err != nil {
-			return err
-		}
-		a, err := pinFile(qdir, doc)
-		if err != nil {
-			return err
-		}
-		e.Docs = append(e.Docs, a)
-	}
-	if err := index.Save(p.IndexTools, e); err != nil {
-		return err
-	}
-	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
-		Event: "author", Tool: m.Name, Version: m.Version,
-		TierTo: provenance.Tier(0), Actor: config.Actor(),
-		Origin: e.Source, SelfTest: "pass",
-	}); err != nil {
-		return err
-	}
-	fmt.Printf("registered %s@%s at Tier 0 (authored python-uv, quarantined)\n", m.Name, m.Version)
-	fmt.Printf("  store: %s\n  %s  sha256=%s\n", qdir, binArt.Path, binArt.Sha256)
-	fmt.Printf("  deps locked with hashes in %s.lock — review the dependency tree\n", src)
-	fmt.Printf("\nPROMOTION REQUEST — human action required\n  review: read %s, %s.lock, and selftest.sh\n  approve: smith promote %s@%s   (interactive terminal only)\nuntil then: runnable only via `smith run %s` (sandboxed, offline)\n",
-		src, src, m.Name, m.Version, m.Name)
-	return nil
-}
-
-// runSelfTest executes <draft>/selftest.sh <entrypoint> sandboxed, from a
-// scratch workdir so tool/test writes land nowhere meaningful.
-func runSelfTest(p config.Paths, dir, entry string) error {
-	st := filepath.Join(dir, "selftest.sh")
-	if _, err := os.Stat(st); err != nil {
-		return fmt.Errorf("selftest.sh missing: a tool without a self-test cannot register")
-	}
-	work, err := os.MkdirTemp("", "smith-selftest-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(work)
-	// Self-tests always run under the strict default (no network): this is
-	// the least-trusted moment — brand-new code auto-run by register. A
-	// network-declaring tool must exercise its offline logic here; its live
-	// behavior is validated by the human via `smith run` after review.
-	argv, err := sandbox.Command(p.SandboxProfiles, work, sandbox.Perms{}, []string{"/bin/bash", st, entry})
-	if err != nil {
-		return err // no sandbox -> no self-test -> no registration
-	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = work
-	cmd.Env, err = sandbox.Env(nil) // self-tests run unreviewed code: sanitized env too
-	if err != nil {
-		return err
-	}
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	fmt.Fprintf(os.Stderr, "[smith] running self-test sandboxed in %s\n", work)
-	return cmd.Run()
-}
-
-func pinFile(base, rel string) (index.Artifact, error) {
-	sum, err := store.HashFile(filepath.Join(base, rel))
-	if err != nil {
-		return index.Artifact{}, err
-	}
-	return index.Artifact{Path: rel, Sha256: sum}, nil
-}
-
+// copyPlain copies a file, creating parent dirs, at 0644.
 func copyPlain(src, dst string) error {
 	raw, err := os.ReadFile(src)
 	if err != nil {
@@ -923,6 +122,48 @@ func copyPlain(src, dst string) error {
 	return os.WriteFile(dst, raw, 0o644)
 }
 
+// ---------------------------------------------------------------- new
+
+func cmdNew(p config.Paths, args []string) error {
+	fs := flag.NewFlagSet("new", flag.ContinueOnError)
+	runtime := fs.String("runtime", "bash", "tool runtime: bash | python | go | python-uv")
+	desc := fs.String("desc", "", "one-line description (SKILL.md trigger)")
+	var name string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		name, args = args[0], args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if name == "" && fs.NArg() == 1 {
+		name = fs.Arg(0)
+	}
+	if name == "" {
+		return fmt.Errorf("usage: smith new <name> [--runtime bash|python|go|python-uv] [--desc <text>]")
+	}
+	if strings.ContainsAny(name, "/@ ") {
+		return fmt.Errorf("tool name must be a plain identifier (no /, @, spaces)")
+	}
+	d := *desc
+	if d == "" {
+		d = "TODO: describe " + name
+	}
+	dir := name // scaffold into ./<name>, ready to become a git repo
+	if err := scaffold.Create(dir, scaffold.Manifest{
+		Name: name, Version: "0.1.0", Description: d, Runtime: *runtime,
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("scaffolded tool: %s/\n", dir)
+	fmt.Printf(`next steps:
+  1. implement %s/%s and its selftest.sh; sharpen SKILL.md's trigger
+  2. make it a repo:  cd %s && git init && git add -A && git commit -m "%s v0.1.0" && git tag v0.1.0
+  3. publish it (own repo / org repo / embed in a project) and topic-tag it "smith-tool"
+  4. adopt it:  smith use <repo-or-path>@v0.1.0   (from a project)
+`, dir, name, dir, name)
+	return nil
+}
+
 // ---------------------------------------------------------------- list
 
 func cmdList(p config.Paths, args []string) error {
@@ -931,256 +172,85 @@ func cmdList(p config.Paths, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	entries, err := index.List(p.IndexTools)
+	lock, err := loadProjLock()
 	if err != nil {
 		return err
 	}
-	if *asJSON {
-		if entries == nil {
-			entries = []index.Entry{}
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(entries)
+	names := make([]string, 0, len(lock.Tools))
+	for n := range lock.Tools {
+		names = append(names, n)
 	}
-	if len(entries) == 0 {
-		fmt.Println("no tools in index; try `smith add <name>`")
+	sort.Strings(names)
+	if *asJSON {
+		return jsonPrint(lock)
+	}
+	if len(names) == 0 {
+		fmt.Println("no tools adopted in this project; try `smith use <repo>` or `smith search`")
 		return nil
 	}
-	tierName := map[int]string{0: "0 authored", 1: "1 TRUSTED", 2: "2 external"}
-	fmt.Printf("%-16s %-12s %-12s %-14s %-10s %s\n", "NAME", "VERSION", "PLATFORM", "TIER", "ORIGIN", "ADDED")
-	for _, e := range entries {
-		origin := e.Origin
-		if i := strings.Index(origin, ":"); i > 0 {
-			origin = origin[:i]
+	installed := func(n string) string {
+		if _, err := os.Lstat(filepath.Join(smithDir, "bin", n)); err == nil {
+			return "on PATH"
 		}
-		fmt.Printf("%-16s %-12s %-12s %-14s %-10s %s\n", e.Name, e.Version, e.Platform, tierName[e.Tier], origin, e.AddedAt)
+		return "not installed (run `smith install`)"
+	}
+	fmt.Printf("%-16s %-10s %-10s %s\n", "TOOL", "VERSION", "RUNTIME", "STATUS")
+	for _, n := range names {
+		t := lock.Tools[n]
+		fmt.Printf("%-16s %-10s %-10s %s\n", n, t.Version, t.Runtime, installed(n))
 	}
 	return nil
-}
-
-// ---------------------------------------------------------------- run
-
-func cmdRun(p config.Paths, args []string) error {
-	// Leading --pass-env NAME[,NAME...] flags forward specific parent env
-	// vars into the sandbox (ignored for Tier 1, which runs unsandboxed
-	// with the full environment anyway).
-	var passEnv []string
-	for len(args) > 0 {
-		if v, ok := strings.CutPrefix(args[0], "--pass-env="); ok {
-			passEnv = append(passEnv, strings.Split(v, ",")...)
-			args = args[1:]
-		} else if args[0] == "--pass-env" && len(args) > 1 {
-			passEnv = append(passEnv, strings.Split(args[1], ",")...)
-			args = args[2:]
-		} else {
-			break
-		}
-	}
-	if len(args) < 1 {
-		return fmt.Errorf("usage: smith run [--pass-env NAME,...] <name>[@<version>] [args...]")
-	}
-	name, version := splitSpec(args[0])
-	toolArgs := args[1:]
-	e, err := index.Resolve(p.IndexTools, name, version)
-	if err != nil {
-		return err
-	}
-	var base string
-	if e.Tier == 1 {
-		base = store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
-	} else {
-		base = store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-	}
-	art, err := pickArtifact(effectiveArtifacts(e, base), name, e.Name+"@"+e.Version)
-	if err != nil {
-		return err
-	}
-	bin := filepath.Join(base, art.Path)
-	// Integrity gate before every execution: the pinned hash must match.
-	sum, err := store.HashFile(bin)
-	if err != nil {
-		return fmt.Errorf("artifact missing or unreadable (store/index drift?): %w", err)
-	}
-	if sum != art.Sha256 {
-		return fmt.Errorf("REFUSING TO RUN %s: sha256 mismatch\n  pinned: %s\n  actual: %s\nrun `smith verify` and investigate", bin, art.Sha256, sum)
-	}
-	argv := append([]string{bin}, toolArgs...)
-	env := os.Environ()
-	if e.Tier != 1 {
-		perms := toolPerms(base)
-		wrapped, err := sandbox.Command(p.SandboxProfiles, "", perms, argv)
-		if err != nil {
-			return err // never fall back to unsandboxed
-		}
-		if env, err = sandbox.Env(passEnv); err != nil {
-			return err
-		}
-		net := "no network"
-		if perms.Network {
-			net = "NETWORK GRANTED (per manifest)"
-		}
-		fmt.Fprintf(os.Stderr, "[smith] tier %d tool — running sandboxed (%s, writes limited to CWD+TMP, env sanitized)\n", e.Tier, net)
-		argv = wrapped
-	}
-	exe, err := exec.LookPath(argv[0])
-	if err != nil {
-		return err
-	}
-	return syscall.Exec(exe, argv, env)
-}
-
-// effectiveArtifacts returns the files to integrity-check for a tool: the
-// signed index pins when present (authored tools, plus the native-add
-// platform of an external), otherwise the local pins recorded in the store
-// at fetch time (an external materialized here from the signed mise.lock).
-func effectiveArtifacts(e index.Entry, base string) []index.Artifact {
-	if len(e.Artifacts) > 0 {
-		return e.Artifacts
-	}
-	if pins, ok := store.ReadPins(base); ok {
-		out := make([]index.Artifact, len(pins))
-		for i, pn := range pins {
-			out[i] = index.Artifact{Path: pn.Path, Sha256: pn.Sha256}
-		}
-		return out
-	}
-	return nil
-}
-
-// toolPerms reads a tool's sandbox grant from its bundle manifest. Authored
-// tools ship manifest.yaml; external tools have none, so they get the strict
-// default (no network).
-func toolPerms(base string) sandbox.Perms {
-	m, err := scaffold.LoadManifest(base)
-	if err != nil || m.Sandbox == nil {
-		return sandbox.Perms{}
-	}
-	return sandbox.Perms{Network: m.Sandbox.Network}
-}
-
-func pickArtifact(arts []index.Artifact, name, spec string) (index.Artifact, error) {
-	if len(arts) == 0 {
-		return index.Artifact{}, fmt.Errorf("%s is not materialized here — run `smith fetch %s`", spec, name)
-	}
-	for _, a := range arts {
-		if filepath.Base(a.Path) == name {
-			return a, nil
-		}
-	}
-	if len(arts) == 1 {
-		return arts[0], nil
-	}
-	var names []string
-	for _, a := range arts {
-		names = append(names, filepath.Base(a.Path))
-	}
-	return index.Artifact{}, fmt.Errorf("%s ships several binaries (%s); run one by its own name", spec, strings.Join(names, ", "))
 }
 
 // ---------------------------------------------------------------- review
 
-// cmdReview surfaces everything a human needs to make the promotion decision
-// (§7): it re-checks the on-disk bytes against their pins, prints provenance,
-// and shows the source — inline, in $VISUAL/$EDITOR, or as paths to open.
-// Read-only; it never changes tiers.
 func cmdReview(p config.Paths, args []string) error {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	inline := fs.Bool("inline", false, "force the interactive viewer (default on a TTY)")
 	plain := fs.Bool("plain", false, "dump source to stdout (no TUI); default when piped")
-	edit := fs.Bool("edit", false, "open the bundle in an editor")
-	editor := fs.String("editor", "", "editor command to use (overrides $VISUAL/$EDITOR/config); implies --edit")
+	edit := fs.Bool("edit", false, "open the source in an editor")
+	editor := fs.String("editor", "", "editor command (overrides $VISUAL/$EDITOR/config); implies --edit")
 	paths := fs.Bool("paths", false, "print file paths only")
-	var spec string
+	var arg string
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		spec, args = args[0], args[1:]
+		arg, args = args[0], args[1:]
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if spec == "" && fs.NArg() == 1 {
-		spec = fs.Arg(0)
+	if arg == "" && fs.NArg() == 1 {
+		arg = fs.Arg(0)
 	}
-	if spec == "" {
-		return fmt.Errorf("usage: smith review <name>[@<version>] [--plain|--edit|--paths] [--editor <cmd>]")
+	if arg == "" {
+		return fmt.Errorf("usage: smith review <repo|path|adopted-name> [--plain|--edit|--paths] [--editor <cmd>]")
 	}
-	name, version := splitSpec(spec)
-	e, err := index.Resolve(p.IndexTools, name, version)
+
+	// Resolve to a bundle dir: an adopted tool, a local dir, or a clone.
+	base, cleanup, label, err := resolveReviewTarget(arg)
+	if cleanup != nil {
+		defer cleanup()
+	}
 	if err != nil {
 		return err
 	}
-	base := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-	if e.Tier == 1 {
-		base = store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
+	m, merr := scaffold.LoadManifest(base)
+	entrypoint := ""
+	if merr == nil {
+		entrypoint = m.Entrypoint
+		label = fmt.Sprintf("%s@%s (%s)", m.Name, m.Version, m.Runtime)
 	}
-
-	tierName := map[int]string{0: "0 authored (pending review)", 1: "1 TRUSTED", 2: "2 external (pending review)"}
-	fmt.Printf("== %s@%s ==\n", e.Name, e.Version)
-	fmt.Printf("tier:         %s\n", tierName[e.Tier])
-	fmt.Printf("origin:       %s\n", e.Origin)
-	fmt.Printf("source:       %s\n", e.Source)
-	fmt.Printf("added:        %s\n", e.AddedAt)
-	if e.Verification != "" {
-		fmt.Printf("verification: %s\n", e.Verification)
-	}
-	if perms := toolPerms(base); perms.Network {
-		fmt.Printf("sandbox:      ⚠ NETWORK egress requested (scrutinize why this tool needs it)\n")
-	} else {
-		fmt.Printf("sandbox:      default (no network; writes CWD+TMP)\n")
-	}
-
-	// Integrity: the bytes you're about to read must match the pins, or the
-	// review is meaningless.
-	fmt.Println("\nintegrity (pinned bytes vs on-disk):")
-	allPinned := append(append([]index.Artifact{}, effectiveArtifacts(e, base)...), e.Docs...)
-	drift := false
-	for _, a := range allPinned {
-		sum, herr := store.HashFile(filepath.Join(base, a.Path))
-		switch {
-		case herr != nil:
-			fmt.Printf("  MISSING  %s (%v)\n", a.Path, herr)
-			drift = true
-		case sum != a.Sha256:
-			fmt.Printf("  MISMATCH %s\n", a.Path)
-			drift = true
-		default:
-			fmt.Printf("  ok       %s\n", a.Path)
-		}
-	}
-	if drift {
-		fmt.Fprintln(os.Stderr, "\n[smith] WARNING: on-disk bytes differ from the pinned hashes — do NOT promote; investigate.")
-	}
-
-	// Provenance for this tool across all machines' logs.
-	if entries := provenanceFor(p, e.Name, e.Version); len(entries) > 0 {
-		fmt.Println("\nprovenance:")
-		for _, pe := range entries {
-			line := fmt.Sprintf("  %s  %-8s actor=%s", pe.Time, pe.Event, pe.Actor)
-			if pe.SelfTest != "" {
-				line += " self-test=" + pe.SelfTest
-			}
-			if pe.Reviewer != "" {
-				line += " reviewer=" + pe.Reviewer
-			}
-			if pe.Reason != "" {
-				line += " reason=" + pe.Reason
-			}
-			fmt.Println(line)
-		}
-	}
+	fmt.Printf("== reviewing %s ==\n  source: %s\n", label, base)
 
 	all, err := bundleFiles(base)
 	if err != nil {
 		return err
 	}
-	files := orderForReview(e, all) // source (executables) first, docs last
-	fmt.Printf("\nbundle (%d files) in %s:\n", len(files), base)
+	files := orderForReview(entrypoint, all)
+	fmt.Printf("\nbundle (%d files):\n", len(files))
 	for _, f := range files {
 		fmt.Printf("  %s\n", f)
 	}
 
-	// Resolve the editor once: --editor flag > $VISUAL > $EDITOR >
-	// config.yaml editor. Env must be *exported* to be visible here.
 	fc, _ := p.LoadFileConfig()
 	ed := *editor
 	for _, cand := range []string{os.Getenv("VISUAL"), os.Getenv("EDITOR"), fc.Editor} {
@@ -1189,9 +259,6 @@ func cmdReview(p config.Paths, args []string) error {
 		}
 	}
 
-	// Pick a mode. Explicit flags win; otherwise the config default (tui
-	// unless overridden) applies on a real terminal. Piped/non-TTY always
-	// falls back to a plain dump so `smith review x | less` and agents work.
 	tty := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	def := fc.Review.Default
 	if def == "" {
@@ -1208,12 +275,12 @@ func cmdReview(p config.Paths, args []string) error {
 	case *inline:
 		mode = "tui"
 	case tty:
-		mode = def // configurable: tui | plain | edit | paths
+		mode = def
 	default:
 		mode = "plain"
 	}
 	if mode == "tui" && !tty {
-		mode = "plain" // can't drive a TUI without a terminal
+		mode = "plain"
 	}
 	if mode != "tui" && mode != "plain" && mode != "edit" && mode != "paths" {
 		return fmt.Errorf("config review.default %q is not one of tui|plain|edit|paths", def)
@@ -1227,24 +294,57 @@ func cmdReview(p config.Paths, args []string) error {
 	case "edit":
 		return openInEditor(ed, base, files)
 	case "plain":
-		if err := printInline(base, files); err != nil {
-			return err
-		}
+		return printInline(base, files)
 	case "tui":
-		if err := runReviewTUI(e, base, files, fc); err != nil {
-			return err
-		}
-	}
-
-	if e.Tier != 1 {
-		fmt.Printf("\nif the source is sound: smith promote %s@%s  (interactive)\n", e.Name, e.Version)
+		return runReviewTUI(m.Name, m.Version, base, files, fc)
 	}
 	return nil
 }
 
-// runReviewTUI loads the bundle into the interactive reviewer and prints the
-// resulting comment report (agent-pasteable) on exit.
-func runReviewTUI(e index.Entry, base string, files []string, fc config.FileConfig) error {
+// resolveReviewTarget turns an argument into a bundle dir. Returns a cleanup
+// func for temporary clones.
+func resolveReviewTarget(arg string) (base string, cleanup func(), label string, err error) {
+	if adopted := filepath.Join(smithDir, "tools", arg); dirHasManifest(adopted) {
+		return adopted, nil, "adopted:" + arg, nil
+	}
+	if dirHasManifest(arg) {
+		return arg, nil, arg, nil
+	}
+	// Treat as a repo to clone.
+	tmp, terr := os.MkdirTemp("", "smith-review-")
+	if terr != nil {
+		return "", nil, "", terr
+	}
+	cleanup = func() { os.RemoveAll(tmp) }
+	clone := filepath.Join(tmp, "repo")
+	src := arg
+	ver := ""
+	if !strings.Contains(arg, "://") && !strings.Contains(arg, "git@") {
+		if at := strings.LastIndex(arg, "@"); at > 0 {
+			src, ver = arg[:at], arg[at+1:]
+		}
+	}
+	cc := exec.Command("git", "clone", "--quiet", expandSource(src), clone)
+	cc.Stderr = os.Stderr
+	if cerr := cc.Run(); cerr != nil {
+		return "", cleanup, "", fmt.Errorf("cloning %s: %w", src, cerr)
+	}
+	if ver != "" {
+		co := exec.Command("git", "-C", clone, "checkout", "--quiet", ver)
+		co.Stderr = os.Stderr
+		if cerr := co.Run(); cerr != nil {
+			return "", cleanup, "", fmt.Errorf("checkout %s: %w", ver, cerr)
+		}
+	}
+	return clone, cleanup, arg, nil
+}
+
+func dirHasManifest(dir string) bool {
+	fi, err := os.Stat(filepath.Join(dir, "manifest.yaml"))
+	return err == nil && !fi.IsDir()
+}
+
+func runReviewTUI(name, version, base string, files []string, fc config.FileConfig) error {
 	rf, err := loadReviewFiles(base, files)
 	if err != nil {
 		return err
@@ -1253,7 +353,7 @@ func runReviewTUI(e index.Entry, base string, files []string, fc config.FileConf
 	if fc.Review.Color == "never" {
 		theme = reviewtui.ThemeByName("mono")
 	}
-	m := reviewtui.New(e.Name, e.Version, rf)
+	m := reviewtui.New(name, version, rf)
 	if err := reviewtui.RunTerminal(m, theme); err != nil {
 		return err
 	}
@@ -1266,9 +366,6 @@ func runReviewTUI(e index.Entry, base string, files []string, fc config.FileConf
 	return nil
 }
 
-// loadReviewFiles reads a bundle into reviewer files: text is split into
-// lines with a detected language; binary artifacts become a single note line
-// (they are not human-readable in a source view).
 func loadReviewFiles(base string, files []string) ([]reviewtui.File, error) {
 	var rf []reviewtui.File
 	for _, rel := range files {
@@ -1277,9 +374,9 @@ func loadReviewFiles(base string, files []string) ([]reviewtui.File, error) {
 			return nil, err
 		}
 		if isBinary(data) {
-			sum, _ := store.HashFile(filepath.Join(base, rel))
+			sum := sha256.Sum256(data)
 			rf = append(rf, reviewtui.File{Name: rel, Lang: "generic",
-				Lines: []string{fmt.Sprintf("(binary file, %d bytes, sha256=%s)", len(data), sum)}})
+				Lines: []string{fmt.Sprintf("(binary file, %d bytes, sha256=%s)", len(data), hex.EncodeToString(sum[:])[:16])}})
 			continue
 		}
 		lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
@@ -1292,74 +389,39 @@ func loadReviewFiles(base string, files []string) ([]reviewtui.File, error) {
 	return rf, nil
 }
 
-// provenanceFor returns log entries mentioning a tool@version, oldest first,
-// across every per-machine log.
-func provenanceFor(p config.Paths, name, version string) []provenance.Entry {
-	var out []provenance.Entry
-	logs, _ := filepath.Glob(filepath.Join(filepath.Dir(p.ProvenanceLog), "*.jsonl"))
-	for _, lg := range logs {
-		raw, err := os.ReadFile(lg)
-		if err != nil {
-			continue
-		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-			var pe provenance.Entry
-			if json.Unmarshal([]byte(line), &pe) != nil {
-				continue
-			}
-			if pe.Tool == name && (pe.Version == version || pe.Version == "") {
-				out = append(out, pe)
-			}
+// orderForReview puts source first: the entrypoint, then selftest.sh, then the
+// rest — so the reviewer reads what runs before the metadata.
+func orderForReview(entrypoint string, all []string) []string {
+	rank := func(f string) int {
+		switch {
+		case entrypoint != "" && f == entrypoint:
+			return 0
+		case strings.HasPrefix(f, "bin/") || f == "selftest.sh":
+			return 1
+		case f == "SKILL.md" || f == "manifest.yaml":
+			return 3
+		default:
+			return 2
 		}
 	}
+	out := append([]string(nil), all...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if ri, rj := rank(out[i]), rank(out[j]); ri != rj {
+			return ri < rj
+		}
+		return out[i] < out[j]
+	})
 	return out
 }
 
-// orderForReview sorts bundle files source-first: executables (the entry
-// point and any other artifacts) before docs (SKILL.md, selftest, manifest),
-// so the reviewer reads what actually runs before the metadata. Any file not
-// classified by the index entry is appended last.
-func orderForReview(e index.Entry, all []string) []string {
-	rank := map[string]int{}
-	for _, a := range e.Artifacts {
-		rank[a.Path] = 0
-	}
-	for _, d := range e.Docs {
-		if _, ok := rank[d.Path]; !ok {
-			if strings.HasPrefix(d.Path, "bin/") {
-				rank[d.Path] = 1 // executable docs (e.g. selftest.sh) — still code
-			} else {
-				rank[d.Path] = 2 // metadata (SKILL.md, manifest.yaml)
-			}
-		}
-	}
-	ordered := append([]string(nil), all...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		ri, oki := rank[ordered[i]]
-		rj, okj := rank[ordered[j]]
-		if !oki {
-			ri = 3
-		}
-		if !okj {
-			rj = 3
-		}
-		if ri != rj {
-			return ri < rj
-		}
-		return ordered[i] < ordered[j]
-	})
-	return ordered
-}
-
-// bundleFiles lists the regular files in a tool's store dir, relative paths.
 func bundleFiles(base string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
+		}
+		if strings.Contains(path, string(filepath.Separator)+".git"+string(filepath.Separator)) {
+			return nil
 		}
 		rel, rerr := filepath.Rel(base, path)
 		if rerr != nil {
@@ -1371,8 +433,6 @@ func bundleFiles(base string) ([]string, error) {
 	return out, err
 }
 
-// printInline dumps each text file with a header; binary files are noted, not
-// printed (an external Tier-2 binary is not human-readable).
 func printInline(base string, files []string) error {
 	for _, f := range files {
 		full := filepath.Join(base, f)
@@ -1382,8 +442,8 @@ func printInline(base string, files []string) error {
 		}
 		fmt.Printf("\n===== %s =====\n", f)
 		if isBinary(data) {
-			sum, _ := store.HashFile(full)
-			fmt.Printf("(binary, %d bytes, sha256=%s — inspect with your own tools)\n", len(data), sum)
+			sum := sha256.Sum256(data)
+			fmt.Printf("(binary, %d bytes, sha256=%s)\n", len(data), hex.EncodeToString(sum[:])[:16])
 			continue
 		}
 		os.Stdout.Write(data)
@@ -1407,9 +467,8 @@ func isBinary(data []byte) bool {
 	return false
 }
 
-// openInEditor opens the bundle files with the resolved editor command. It
-// never guesses an editor: with none resolved it prints the paths so the
-// operator opens them in whatever they use.
+// openInEditor opens files one at a time (advancing when each closes), which
+// works the same across editors. Resolves --editor/$VISUAL/$EDITOR/config.
 func openInEditor(ed, base string, files []string) error {
 	full := make([]string, len(files))
 	for i, f := range files {
@@ -1417,21 +476,15 @@ func openInEditor(ed, base string, files []string) error {
 	}
 	if strings.TrimSpace(ed) == "" {
 		fmt.Fprintln(os.Stderr, "[smith] no editor resolved. Set one of:")
-		fmt.Fprintln(os.Stderr, "  export EDITOR=nano        (must be EXPORTed — a bare EDITOR=... isn't inherited)")
+		fmt.Fprintln(os.Stderr, "  export EDITOR=nano        (must be EXPORTed)")
 		fmt.Fprintln(os.Stderr, "  editor: nano              in $SMITH_HOME/config.yaml")
 		fmt.Fprintln(os.Stderr, "  smith review ... --editor nano")
-		fmt.Fprintln(os.Stderr, "meanwhile, open these paths yourself:")
 		for _, f := range full {
 			fmt.Println(f)
 		}
 		return nil
 	}
-	// Open each file in its own editor session, advancing when you close it.
-	// This works identically across editors — terminal editors (nano/vim)
-	// would otherwise load extra files as hidden buffers you never see, and
-	// exiting closes them all; sequential sessions make every file reviewable
-	// no matter the editor.
-	fields := strings.Fields(ed) // allow "code --wait" etc.
+	fields := strings.Fields(ed)
 	for i, f := range full {
 		fmt.Fprintf(os.Stderr, "[smith] [%d/%d] %s — close the editor to continue\n", i+1, len(full), files[i])
 		argv := append(append([]string(nil), fields[1:]...), f)
@@ -1444,1065 +497,63 @@ func openInEditor(ed, base string, files []string) error {
 	return nil
 }
 
-// ---------------------------------------------------------------- promote
+// ---------------------------------------------------------------- shared helpers (adopt.go)
 
-func cmdPromote(p config.Paths, args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("usage: smith promote <name>[@<version>]")
+// ensureActivation adds env._.path = [binDir] to the project's mise.local.toml
+// so adopted tools land on PATH. Refuses to guess on exotic existing config.
+func ensureActivation(projectDir, binDir string) error {
+	path := filepath.Join(projectDir, "mise.local.toml")
+	pathLine := fmt.Sprintf("_.path = [%q]", binDir)
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return os.WriteFile(path, []byte("# managed by smith: puts adopted tools on PATH\n[env]\n"+pathLine+"\n"), 0o644)
 	}
-	name, version := splitSpec(args[0])
-	e, err := index.Resolve(p.IndexTools, name, version)
 	if err != nil {
 		return err
 	}
-	if e.Tier == 1 {
-		return fmt.Errorf("%s@%s is already Tier 1", e.Name, e.Version)
-	}
-
-	// HARD GATE (§7): promotion is a human decision made interactively.
-	// Agent sessions run without a TTY on stdin (pipes, /dev/null) and are
-	// refused here. This is a guard against accidental agent promotion, not
-	// a cryptographic proof of humanity — the real gate is the review.
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return fmt.Errorf("promotion requires an interactive terminal (human review). " +
-			"If you are an agent: stop — ask the operator to run this command themselves")
-	}
-
-	fmt.Printf("Promotion review for %s@%s (tier %d -> 1)\n", e.Name, e.Version, e.Tier)
-	fmt.Printf("  origin: %s\n  source: %s\n  added:  %s\n", e.Origin, e.Source, e.AddedAt)
-	if e.Verification != "" {
-		fmt.Printf("  verification at add time: %s\n", e.Verification)
-	}
-	qdir := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-	fmt.Printf("  store:  %s\n", qdir)
-	for _, a := range e.Artifacts {
-		fmt.Printf("  %s  sha256=%s\n", a.Path, a.Sha256)
-	}
-	fmt.Printf("\nReview means reading the tool source / provenance — a passing self-test is not sufficient (§7).\n")
-	fmt.Printf("If you haven't: run `smith review %s@%s` in another shell first.\n", e.Name, e.Version)
-
-	rd := bufio.NewReader(os.Stdin)
-	fmt.Print("Reviewer name: ")
-	reviewer, _ := rd.ReadString('\n')
-	reviewer = strings.TrimSpace(reviewer)
-	if reviewer == "" {
-		return fmt.Errorf("aborted: reviewer required")
-	}
-	confirm := fmt.Sprintf("promote %s@%s", e.Name, e.Version)
-	fmt.Printf("Type %q to confirm you reviewed it: ", confirm)
-	typed, _ := rd.ReadString('\n')
-	if strings.TrimSpace(typed) != confirm {
-		return fmt.Errorf("aborted: confirmation did not match")
-	}
-	if err := promoteEntry(p, e, reviewer); err != nil {
-		return err
-	}
-	fmt.Printf("promoted: %s@%s is now Tier 1 (trusted, on PATH via %s)\n", e.Name, e.Version, p.TrustedBin)
-	maybeExportSkill(p, rd, e)
-	// Promotion is local; the entry reaches other machines only once signed
-	// and pushed. Nudge, since promote and publish are separate steps.
-	fmt.Printf("next: run `smith publish` to sign + push this to the index (so other machines can `smith fetch %s`)\n", e.Name)
-	return nil
-}
-
-// maybeExportSkill offers to publish a just-promoted tool's SKILL.md into the
-// skills dir so future agent sessions discover it. Discovery follows trust:
-// only vetted (Tier 1) tools are exported, and demotion removes them.
-func maybeExportSkill(p config.Paths, rd *bufio.Reader, e index.Entry) {
-	if _, err := os.Stat(filepath.Join(store.TrustedDir(p.StoreTrusted, e.Name, e.Version), "SKILL.md")); err != nil {
-		return // no SKILL.md (e.g. external tool) — nothing to export
-	}
-	fc, _ := p.LoadFileConfig()
-	mode := fc.Skills.Export
-	if mode == "" {
-		mode = "ask"
-	}
-	if mode == "never" {
-		return
-	}
-	if mode == "ask" {
-		// Default Yes: promoting a tool almost always means you want it
-		// discoverable. Enter (or y) exports; only an explicit n opts out.
-		fmt.Printf("Export SKILL.md to %s so agent sessions discover %s? [Y/n]: ",
-			filepath.Join(fc.SkillsDir(), e.Name, "SKILL.md"), e.Name)
-		ans, _ := rd.ReadString('\n')
-		if s := strings.TrimSpace(strings.ToLower(ans)); s == "n" || s == "no" {
-			fmt.Println("skipped skill export (run `smith skill export " + e.Name + "` later to add it)")
-			return
-		}
-	}
-	dst, err := exportSkillFile(p, e)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[smith] skill export failed: %v\n", err)
-		return
-	}
-	fmt.Printf("exported skill: %s\n", dst)
-}
-
-// exportSkillFile copies a Tier-1 tool's SKILL.md into the skills dir and logs
-// it. Returns ("", nil) if the tool has no SKILL.md (e.g. an external tool).
-func exportSkillFile(p config.Paths, e index.Entry) (string, error) {
-	src := filepath.Join(store.TrustedDir(p.StoreTrusted, e.Name, e.Version), "SKILL.md")
-	if _, err := os.Stat(src); err != nil {
-		return "", nil
-	}
-	fc, _ := p.LoadFileConfig()
-	dst := filepath.Join(fc.SkillsDir(), e.Name, "SKILL.md")
-	if err := copyPlain(src, dst); err != nil {
-		return "", err
-	}
-	_ = provenance.Append(p.ProvenanceLog, provenance.Entry{
-		Event: "skill-export", Tool: e.Name, Version: e.Version,
-		Actor: config.Actor(), Origin: dst,
-	})
-	return dst, nil
-}
-
-// cmdSkill manages exported discovery skills for promoted tools, so an
-// already-promoted tool's SKILL.md can be (re)exported without re-promoting.
-func cmdSkill(p config.Paths, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: smith skill list|export <name>[@ver]|remove <name>")
-	}
-	fc, _ := p.LoadFileConfig()
-	switch args[0] {
-	case "list":
-		entries, err := index.List(p.IndexTools)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("skills dir: %s\n", fc.SkillsDir())
-		fmt.Printf("%-16s %-10s %s\n", "TOOL", "TIER", "SKILL EXPORTED")
-		for _, e := range entries {
-			if e.Tier != 1 {
-				continue
-			}
-			status := "-"
-			if _, err := os.Stat(filepath.Join(fc.SkillsDir(), e.Name, "SKILL.md")); err == nil {
-				status = "yes"
-			} else if _, err := os.Stat(filepath.Join(store.TrustedDir(p.StoreTrusted, e.Name, e.Version), "SKILL.md")); err != nil {
-				status = "(no SKILL.md)"
-			}
-			fmt.Printf("%-16s %-10s %s\n", e.Name, "1 TRUSTED", status)
-		}
+	text := string(raw)
+	if strings.Contains(text, binDir) {
 		return nil
-	case "export":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: smith skill export <name>[@version]")
-		}
-		name, version := splitSpec(args[1])
-		e, err := index.Resolve(p.IndexTools, name, version)
-		if err != nil {
-			return err
-		}
-		if e.Tier != 1 {
-			return fmt.Errorf("%s is tier %d; only Tier 1 (trusted) tools export skills — promote it first", e.Name, e.Tier)
-		}
-		dst, err := exportSkillFile(p, e)
-		if err != nil {
-			return err
-		}
-		if dst == "" {
-			return fmt.Errorf("%s has no SKILL.md to export", e.Name)
-		}
-		fmt.Printf("exported skill: %s\n", dst)
-		return nil
-	case "remove":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: smith skill remove <name>")
-		}
-		removeExportedSkill(p, args[1])
-		return nil
-	default:
-		return fmt.Errorf("unknown skill subcommand %q (list|export|remove)", args[0])
 	}
-}
-
-// removeExportedSkill deletes a tool's exported skill dir (called on demote so
-// discovery stays in sync with trust). Silent if none exists.
-func removeExportedSkill(p config.Paths, name string) {
-	fc, _ := p.LoadFileConfig()
-	dir := filepath.Join(fc.SkillsDir(), name)
-	if _, err := os.Stat(filepath.Join(dir, "SKILL.md")); err != nil {
-		return
+	if strings.Contains(text, "_.path") {
+		return fmt.Errorf("mise.local.toml already sets env._.path; add %q to it manually", binDir)
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		fmt.Fprintf(os.Stderr, "[smith] could not remove exported skill %s: %v\n", dir, err)
-		return
-	}
-	fmt.Printf("removed exported skill: %s\n", dir)
-}
-
-// pushBlob enforces the §5.3 source rule at promotion time: an authored
-// tool's bytes must be on the shared transport before it can become Tier 1,
-// or Goal 1 silently fails on the second machine.
-func pushBlob(p config.Paths, e *index.Entry) error {
-	fc, err := p.LoadFileConfig()
-	if err != nil {
-		return err
-	}
-	tr, err := transport.New(fc.Transport)
-	if err != nil {
-		return fmt.Errorf("authored tool cannot be promoted until its blob is pushed to shared storage: %w", err)
-	}
-	qdir := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-	tmp, err := os.MkdirTemp("", "smith-blob-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	blobPath := filepath.Join(tmp, "blob.tgz")
-	if err := transport.PackBlob(qdir, blobPath); err != nil {
-		return err
-	}
-	sum, err := store.HashFile(blobPath)
-	if err != nil {
-		return err
-	}
-	asset := fmt.Sprintf("%s-%s-%s-%s.tgz", e.Name, e.Version, e.Platform, sum[:12])
-	locator, err := tr.Push(blobPath, asset)
-	if err != nil {
-		return fmt.Errorf("blob push failed — promotion refused: %w", err)
-	}
-	e.Blob = &index.Blob{Locator: locator, Sha256: sum}
-	e.Source = locator
-	fmt.Fprintf(os.Stderr, "[smith] blob pushed to %s (%s)\n", tr.String(), asset)
-	return nil
-}
-
-// promoteEntry performs the promotion mutations after the human gate has
-// passed. Kept separate so the mechanics are testable without weakening the
-// TTY gate above.
-func promoteEntry(p config.Paths, e index.Entry, reviewer string) error {
-	if strings.HasPrefix(e.Source, "local:") {
-		if err := pushBlob(p, &e); err != nil {
-			return err
-		}
-	}
-	qdir := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-	tdir := store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
-	if err := store.Move(qdir, tdir); err != nil {
-		return err
-	}
-	var names []string
-	for _, a := range e.Artifacts {
-		names = append(names, a.Path)
-	}
-	if err := store.LinkBin(p.TrustedBin, p.StoreTrusted, e.Name, e.Version, names); err != nil {
-		return err
-	}
-	from := e.Tier
-	e.Tier = 1
-	if err := index.Save(p.IndexTools, e); err != nil {
-		return err
-	}
-	return provenance.Append(p.ProvenanceLog, provenance.Entry{
-		Event: "promote", Tool: e.Name, Version: e.Version,
-		TierFrom: provenance.Tier(from), TierTo: provenance.Tier(1),
-		Actor: config.Actor(), Reviewer: reviewer,
-	})
-}
-
-// ---------------------------------------------------------------- demote
-
-func cmdDemote(p config.Paths, args []string) error {
-	fs := flag.NewFlagSet("demote", flag.ContinueOnError)
-	reason := fs.String("reason", "", "why trust is being revoked (required, recorded in provenance)")
-	// Accept `smith demote <spec> --reason ...` (stdlib flag stops at the
-	// first positional, so pull the spec out before parsing).
-	var spec string
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		spec, args = args[0], args[1:]
-	}
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if spec == "" && fs.NArg() == 1 {
-		spec = fs.Arg(0)
-	}
-	if spec == "" || *reason == "" {
-		return fmt.Errorf("usage: smith demote <name>[@<version>] --reason <why>")
-	}
-	name, version := splitSpec(spec)
-	e, err := index.Resolve(p.IndexTools, name, version)
-	if err != nil {
-		return err
-	}
-	if e.Tier != 1 {
-		return fmt.Errorf("%s@%s is not Tier 1 (tier %d)", e.Name, e.Version, e.Tier)
-	}
-	var names []string
-	for _, a := range e.Artifacts {
-		names = append(names, a.Path)
-	}
-	// Off PATH first — revocation must be immediate even if the move fails.
-	if err := store.UnlinkBin(p.TrustedBin, p.StoreTrusted, e.Name, e.Version, names); err != nil {
-		return err
-	}
-	tdir := store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
-	qdir := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-	if err := store.Move(tdir, qdir); err != nil {
-		return err
-	}
-	e.Tier = 2
-	if err := index.Save(p.IndexTools, e); err != nil {
-		return err
-	}
-	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
-		Event: "demote", Tool: e.Name, Version: e.Version,
-		TierFrom: provenance.Tier(1), TierTo: provenance.Tier(2),
-		Actor: config.Actor(), Reason: *reason,
-	}); err != nil {
-		return err
-	}
-	removeExportedSkill(p, e.Name) // discovery follows trust: revoke the skill too
-	fmt.Printf("demoted: %s@%s -> Tier 2 quarantine, removed from PATH\n", e.Name, e.Version)
-	return nil
-}
-
-// ---------------------------------------------------------------- publish
-
-// cmdPublish signs the manifest set and commits (and pushes, if a remote is
-// configured) the index repo. Separate, explicit human step after promote —
-// nothing auto-publishes (§4, §7).
-func cmdPublish(p config.Paths, args []string) error {
-	entries, err := index.ListAll(p.IndexTools)
-	if err != nil {
-		return err
-	}
-	// The signed index is the trust vehicle across machines: refuse to sign
-	// Tier 1 authored entries whose blob never made it to shared storage.
-	for _, e := range entries {
-		if e.Tier == 1 && strings.HasPrefix(e.Source, "local:") {
-			return fmt.Errorf("%s@%s is Tier 1 with a machine-local source — re-promote after configuring a transport", e.Name, e.Version)
-		}
-	}
-	// Nothing to publish if no manifest changed since the last commit (the
-	// signature's own timestamp would otherwise make index/ always dirty).
-	if out, _ := gitOutput(p, "status", "--porcelain", "index/tools"); strings.TrimSpace(out) == "" {
-		if _, statErr := os.Stat(filepath.Join(p.Home, "index", "index.sig")); statErr == nil {
-			fmt.Println("no manifest changes since last publish; nothing to do")
-			return nil
-		}
-	}
-	s, err := sign.SignIndex(p.Home, p.IndexTools, nowUTC())
-	if err != nil {
-		return err
-	}
-	fmt.Printf("signed manifest set: digest %s… key %s\n", s.Digest[:12], s.KeyFprint)
-
-	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
-		Event: "publish", Actor: config.Actor(),
-		Origin: "digest:" + s.Digest[:16] + " key:" + s.KeyFprint,
-	}); err != nil {
-		return err
-	}
-	if err := gitInHome(p, "add", "index", "provenance"); err != nil {
-		return err
-	}
-	if err := gitInHome(p, "commit", "-m", "smith publish "+nowUTC()); err != nil {
-		return err
-	}
-	if out, _ := gitOutput(p, "remote"); strings.TrimSpace(out) != "" {
-		if err := gitInHome(p, "push", "-u", "origin", "HEAD"); err != nil {
-			return fmt.Errorf("committed locally but push failed: %w", err)
-		}
-		fmt.Println("index committed and pushed")
+	if i := strings.Index(text, "[env]"); i >= 0 {
+		at := i + len("[env]")
+		text = text[:at] + "\n" + pathLine + text[at:]
 	} else {
-		fmt.Println("index committed (no git remote configured — add one to sync machines)")
+		if text != "" && !strings.HasSuffix(text, "\n") {
+			text += "\n"
+		}
+		text += "\n[env]\n" + pathLine + "\n"
 	}
-	return nil
+	return os.WriteFile(path, []byte(text), 0o644)
 }
 
-// cmdKey manages the signing trust set: list authorized keys, rotate the
-// local key (old stays valid through the window), authorize another machine's
-// key, or revoke one. Mutations re-sign and commit the index.
-func cmdKey(p config.Paths, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: smith key list|rotate|add <pubkey|file> [label]|revoke <fingerprint>")
+// runSelfTest executes <dir>/selftest.sh <entry> sandboxed, from a scratch
+// workdir, with a strict (no-network) profile and sanitized env. Unreviewed
+// code stays contained while it's being adopted.
+func runSelfTest(p config.Paths, dir, entry string) error {
+	st := filepath.Join(dir, "selftest.sh")
+	if _, err := os.Stat(st); err != nil {
+		return fmt.Errorf("selftest.sh missing: a tool without a self-test cannot be adopted")
 	}
-	sub := args[0]
-	rest := args[1:]
-
-	switch sub {
-	case "list":
-		keys, err := sign.LoadAuthorizedKeys(p.Home)
-		if err != nil {
-			return err
-		}
-		if len(keys) == 0 {
-			fmt.Println("no authorized keys yet (nothing published)")
-			return nil
-		}
-		var localFP string
-		if pub, err := sign.LoadPublicKey(p.Home); err == nil {
-			localFP = sign.Fingerprint(pub)
-		}
-		fmt.Printf("%-18s %-10s %s\n", "FINGERPRINT", "LOCAL", "LABEL")
-		for _, k := range keys {
-			local := ""
-			if k.Fingerprint() == localFP {
-				local = "yes (has key)"
-			}
-			fmt.Printf("%-18s %-10s %s\n", k.Fingerprint(), local, k.Label)
-		}
-		return nil
-
-	case "rotate":
-		fp, err := sign.Rotate(p.Home)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("rotated: new signing key %s (previous key kept authorized for the window)\n", fp)
-		return resignAndCommit(p, "smith key rotate "+fp)
-
-	case "add":
-		if len(rest) < 1 {
-			return fmt.Errorf("usage: smith key add <hex-pubkey|file> [label]")
-		}
-		pub, err := sign.ParsePublicKeyArg(rest[0])
-		if err != nil {
-			return err
-		}
-		label := "added"
-		if len(rest) > 1 {
-			label = strings.Join(rest[1:], " ")
-		}
-		if err := sign.AddAuthorizedKey(p.Home, pub, label); err != nil {
-			return err
-		}
-		fmt.Printf("authorized key %s (%s)\n", sign.Fingerprint(pub), label)
-		return resignAndCommit(p, "smith key add "+sign.Fingerprint(pub))
-
-	case "revoke":
-		if len(rest) != 1 {
-			return fmt.Errorf("usage: smith key revoke <fingerprint>")
-		}
-		n, err := sign.RevokeAuthorizedKey(p.Home, rest[0])
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return fmt.Errorf("no authorized key with fingerprint %s", rest[0])
-		}
-		fmt.Printf("revoked %d key(s) with fingerprint %s\n", n, rest[0])
-		return resignAndCommit(p, "smith key revoke "+rest[0])
-
-	default:
-		return fmt.Errorf("unknown key subcommand %q (list|rotate|add|revoke)", sub)
-	}
-}
-
-// resignAndCommit re-signs the index with the current key and commits the
-// trust-set change so other machines pick it up.
-func resignAndCommit(p config.Paths, msg string) error {
-	if _, err := sign.SignIndex(p.Home, p.IndexTools, nowUTC()); err != nil {
-		return err
-	}
-	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
-		Event: "key", Actor: config.Actor(), Reason: msg,
-	}); err != nil {
-		return err
-	}
-	if out, _ := gitOutput(p, "remote"); strings.TrimSpace(out) == "" {
-		fmt.Println("(no git remote — commit/push the index to sync the trust set)")
-		return nil
-	}
-	if err := gitInHome(p, "add", "index", "provenance"); err != nil {
-		return err
-	}
-	if err := gitInHome(p, "commit", "-m", msg); err != nil {
-		return err
-	}
-	if err := gitInHome(p, "push", "-u", "origin", "HEAD"); err != nil {
-		return fmt.Errorf("committed locally but push failed: %w", err)
-	}
-	fmt.Println("trust set re-signed and pushed")
-	return nil
-}
-
-func gitInHome(p config.Paths, args ...string) error {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = p.Home
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-	return cmd.Run()
-}
-
-func gitOutput(p config.Paths, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = p.Home
-	out, err := cmd.Output()
-	return string(out), err
-}
-
-// ---------------------------------------------------------------- fetch
-
-// cmdFetch materializes a tool on this machine from the index alone.
-// Tier 1 + valid index signature -> installed trusted, on PATH.
-// Anything else -> quarantine, sandbox-only, promote locally to trust.
-func cmdFetch(p config.Paths, args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("usage: smith fetch <name>[@<version>]")
-	}
-	if err := p.EnsureLayout(); err != nil {
-		return err
-	}
-	name, version := splitSpec(args[0])
-	e, err := index.Resolve(p.IndexTools, name, version)
+	work, err := os.MkdirTemp("", "smith-selftest-")
 	if err != nil {
 		return err
-	}
-	base := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-	if e.Tier == 1 {
-		base = store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
-	}
-	if _, err := os.Stat(base); err == nil {
-		return fmt.Errorf("%s@%s already installed at %s", e.Name, e.Version, base)
-	}
-
-	trustable := e.Tier == 1
-	if trustable {
-		present, verr := sign.VerifyIndex(p.Home, p.IndexTools)
-		if !present {
-			trustable = false
-			fmt.Fprintln(os.Stderr, "[smith] index is unsigned — Tier 1 entry will be installed to QUARANTINE; promote locally after review")
-		} else if verr != nil {
-			return fmt.Errorf("index signature check failed — refusing to fetch: %w", verr)
-		}
-	}
-
-	switch {
-	case e.Blob != nil:
-		tmp, err := os.MkdirTemp("", "smith-fetch-")
-		if err != nil {
-			return err
-		}
-		defer os.RemoveAll(tmp)
-		blobPath := filepath.Join(tmp, "blob.tgz")
-		fc, err := p.LoadFileConfig()
-		if err != nil {
-			return err
-		}
-		tr, err := transport.New(fc.Transport)
-		if err != nil {
-			return err
-		}
-		if err := tr.Fetch(e.Blob.Locator, blobPath); err != nil {
-			return err
-		}
-		sum, err := store.HashFile(blobPath)
-		if err != nil {
-			return err
-		}
-		if sum != e.Blob.Sha256 {
-			return fmt.Errorf("blob sha256 MISMATCH for %s@%s: pinned=%s got=%s — refusing", e.Name, e.Version, e.Blob.Sha256, sum)
-		}
-		dst := base
-		if !trustable {
-			dst = store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-		}
-		if err := transport.UnpackBlob(blobPath, dst); err != nil {
-			return err
-		}
-	case strings.HasPrefix(e.Source, "mise:"):
-		spec := strings.TrimPrefix(e.Source, "mise:")
-		// Install via the committed lockfile so mise verifies the download
-		// against the signed per-platform checksum — the cross-machine
-		// integrity anchor for externals. Fall back to a plain install only
-		// if no lockfile was published.
-		lockPath := filepath.Join(p.IndexTools, e.Name, e.Version, "mise.lock")
-		if _, statErr := os.Stat(lockPath); statErr == nil {
-			if err := misex.InstallLocked(spec, lockPath); err != nil {
-				return fmt.Errorf("locked install failed (checksum mismatch or unavailable): %w", err)
-			}
-		} else if err := misex.Install(spec); err != nil {
-			return err
-		}
-		binDirs, err := misex.BinPaths(spec)
-		if err != nil || len(binDirs) == 0 {
-			return fmt.Errorf("mise bin-paths failed for %s: %v", spec, err)
-		}
-		dst := base
-		if !trustable {
-			dst = store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-		}
-		var names []string
-		for _, d := range binDirs {
-			copied, err := store.CopyExecutables(d, filepath.Join(dst, "bin"))
-			if err != nil {
-				return err
-			}
-			names = append(names, copied...)
-		}
-		// Record local pins (per-machine, in the git-ignored store) since an
-		// external's extracted bytes are platform-specific and this machine
-		// may not hold the signing key to update the shared index.
-		var pins []store.LocalPin
-		for _, n := range names {
-			rel := filepath.Join("bin", n)
-			sum, herr := store.HashFile(filepath.Join(dst, rel))
-			if herr != nil {
-				return herr
-			}
-			pins = append(pins, store.LocalPin{Path: rel, Sha256: sum})
-		}
-		if err := store.WritePins(dst, pins); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("entry %s@%s has no fetchable source (%s)", e.Name, e.Version, e.Source)
-	}
-
-	// Verify every pinned artifact of what we just materialized.
-	dst := base
-	if !trustable {
-		dst = store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-	}
-	for _, a := range append(append([]index.Artifact{}, e.Artifacts...), e.Docs...) {
-		sum, err := store.HashFile(filepath.Join(dst, a.Path))
-		if err != nil {
-			return fmt.Errorf("pinned file missing after fetch: %s: %w", a.Path, err)
-		}
-		if sum != a.Sha256 {
-			os.RemoveAll(dst)
-			return fmt.Errorf("sha256 MISMATCH on %s after fetch — removed; refusing", a.Path)
-		}
-	}
-	tier := e.Tier
-	if e.Tier == 1 && trustable {
-		var names []string
-		for _, a := range e.Artifacts {
-			names = append(names, a.Path)
-		}
-		if err := store.LinkBin(p.TrustedBin, p.StoreTrusted, e.Name, e.Version, names); err != nil {
-			return err
-		}
-	} else if e.Tier == 1 {
-		tier = 2 // unsigned index: treat as external quarantine locally
-		e.Tier = tier
-		if err := index.Save(p.IndexTools, e); err != nil {
-			return err
-		}
-	}
-	if err := provenance.Append(p.ProvenanceLog, provenance.Entry{
-		Event: "fetch", Tool: e.Name, Version: e.Version,
-		TierTo: provenance.Tier(tier), Actor: config.Actor(), Origin: e.Source,
-	}); err != nil {
-		return err
-	}
-	fmt.Printf("fetched %s@%s -> tier %d (%s)\n", e.Name, e.Version, tier, dst)
-	return nil
-}
-
-// ---------------------------------------------------------------- sync
-
-// cmdSync pulls the index repo and reconciles the local store with it.
-// Its load-bearing job is propagating revocation (§7): a tool demoted on
-// another machine must come off THIS machine's PATH as soon as we sync,
-// even though its binary is still sitting in the local trusted store.
-func cmdSync(p config.Paths, args []string) error {
-	if err := p.EnsureLayout(); err != nil {
-		return err
-	}
-	if out, _ := gitOutput(p, "remote"); strings.TrimSpace(out) != "" {
-		// Commit this machine's local provenance before pulling so the pull
-		// has a clean tree. Each machine writes only its own <hostname>.jsonl,
-		// so a merge across distinct machines never conflicts.
-		if st, _ := gitOutput(p, "status", "--porcelain", "provenance"); strings.TrimSpace(st) != "" {
-			_ = gitInHome(p, "add", "provenance")
-			_ = gitInHome(p, "commit", "-m", "smith sync: local provenance "+nowUTC())
-		}
-		fmt.Fprintln(os.Stderr, "[smith] pulling index...")
-		if err := gitInHome(p, "pull", "--no-rebase", "--no-edit"); err != nil {
-			return fmt.Errorf("git pull failed (resolve manually in %s): %w", p.Home, err)
-		}
-	} else {
-		fmt.Fprintln(os.Stderr, "[smith] no git remote; reconciling against local index only")
-	}
-
-	// Signature is advisory for revocation (removing trust is always safe),
-	// but report it so the operator knows the index's integrity state.
-	if present, err := sign.VerifyIndex(p.Home, p.IndexTools); present && err != nil {
-		fmt.Fprintf(os.Stderr, "[smith] WARNING: index signature invalid after pull: %v\n", err)
-	}
-
-	installed, err := store.InstalledVersions(p.StoreTrusted)
-	if err != nil {
-		return err
-	}
-	revoked := 0
-	for name, versions := range installed {
-		for _, version := range versions {
-			e, err := index.Load(p.IndexTools, name, version)
-			demoted := err != nil || e.Tier != 1
-			if !demoted {
-				continue
-			}
-			reason := "revoked upstream (tier changed)"
-			if err != nil {
-				reason = "revoked upstream (entry removed from index)"
-			}
-			if uerr := store.UnlinkVersion(p.TrustedBin, p.StoreTrusted, name, version); uerr != nil {
-				return uerr
-			}
-			if merr := store.Move(store.TrustedDir(p.StoreTrusted, name, version),
-				store.QuarantineDir(p.StoreQuarantine, name, version)); merr != nil {
-				return merr
-			}
-			if aerr := provenance.Append(p.ProvenanceLog, provenance.Entry{
-				Event: "demote", Tool: name, Version: version,
-				TierFrom: provenance.Tier(1), TierTo: provenance.Tier(2),
-				Actor: config.Actor(), Reason: "sync: " + reason,
-			}); aerr != nil {
-				return aerr
-			}
-			fmt.Printf("REVOKED %s@%s — off PATH, moved to quarantine (%s)\n", name, version, reason)
-			revoked++
-		}
-	}
-
-	// Report Tier 1 entries not installed here (fetch candidates) — sync
-	// never auto-fetches; that stays an explicit `smith fetch`.
-	available := 0
-	all, err := index.List(p.IndexTools)
-	if err != nil {
-		return err
-	}
-	for _, e := range all {
-		if e.Tier != 1 {
-			continue
-		}
-		if _, err := os.Stat(store.TrustedDir(p.StoreTrusted, e.Name, e.Version)); os.IsNotExist(err) {
-			if available == 0 {
-				fmt.Println("\ntrusted tools in the index not installed here:")
-			}
-			fmt.Printf("  %s@%s   (smith fetch %s)\n", e.Name, e.Version, e.Name)
-			available++
-		}
-	}
-	fmt.Printf("\nsync complete: %d revoked, %d available to fetch\n", revoked, available)
-	return nil
-}
-
-// ---------------------------------------------------------------- gc
-
-func cmdGC(p config.Paths, args []string) error {
-	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
-	olderThan := fs.String("older-than", "30d", "minimum age of a Tier 0 version before it is eligible (e.g. 7d, 24h)")
-	apply := fs.Bool("yes", false, "actually delete (default is a dry run)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	cutoff, err := parseAge(*olderThan)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-
-	all, err := index.ListAll(p.IndexTools)
-	if err != nil {
-		return err
-	}
-	var victims []index.Entry
-	for _, e := range all {
-		if e.Tier != 0 {
-			continue // only unpromoted authored tools are GC-eligible
-		}
-		added, perr := time.Parse(time.RFC3339, e.AddedAt)
-		if perr != nil {
-			fmt.Fprintf(os.Stderr, "[smith] skip %s@%s: unparseable added_at %q\n", e.Name, e.Version, e.AddedAt)
-			continue
-		}
-		if now.Sub(added) >= cutoff {
-			victims = append(victims, e)
-		}
-	}
-
-	// Stale drafts: a draft whose version is not registered in the index.
-	var staleDrafts []string
-	if dirs, derr := os.ReadDir(filepath.Join(p.Home, "drafts")); derr == nil {
-		for _, d := range dirs {
-			if !d.IsDir() {
-				continue
-			}
-			m, merr := scaffold.LoadManifest(draftDir(p, d.Name()))
-			if merr != nil {
-				continue
-			}
-			if _, lerr := index.Load(p.IndexTools, m.Name, m.Version); lerr != nil {
-				staleDrafts = append(staleDrafts, d.Name())
-			}
-		}
-	}
-
-	if len(victims) == 0 && len(staleDrafts) == 0 {
-		fmt.Printf("nothing to collect (Tier 0 older than %s, unregistered drafts)\n", *olderThan)
-		return nil
-	}
-	verb := "would remove"
-	if *apply {
-		verb = "removing"
-	}
-	for _, e := range victims {
-		fmt.Printf("%s Tier 0 %s@%s (added %s)\n", verb, e.Name, e.Version, e.AddedAt)
-		if *apply {
-			if rerr := os.RemoveAll(store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)); rerr != nil {
-				return rerr
-			}
-			if rerr := os.RemoveAll(filepath.Join(p.IndexTools, e.Name, e.Version)); rerr != nil {
-				return rerr
-			}
-			// Prune the now-empty tool dir.
-			os.Remove(filepath.Join(p.IndexTools, e.Name))
-			if aerr := provenance.Append(p.ProvenanceLog, provenance.Entry{
-				Event: "gc", Tool: e.Name, Version: e.Version,
-				TierFrom: provenance.Tier(0), Actor: config.Actor(),
-				Reason: "gc: unpromoted Tier 0 older than " + *olderThan,
-			}); aerr != nil {
-				return aerr
-			}
-		}
-	}
-	for _, name := range staleDrafts {
-		fmt.Printf("%s stale draft %s\n", verb, name)
-		if *apply {
-			if rerr := os.RemoveAll(draftDir(p, name)); rerr != nil {
-				return rerr
-			}
-		}
-	}
-	if !*apply {
-		fmt.Println("\ndry run — re-run with --yes to delete")
-	}
-	return nil
-}
-
-// parseAge parses durations like "30d", "24h", "90m" into a time.Duration.
-func parseAge(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
-	if strings.HasSuffix(s, "d") {
-		days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
-		if err != nil || days < 0 {
-			return 0, fmt.Errorf("invalid age %q", s)
-		}
-		return time.Duration(days) * 24 * time.Hour, nil
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil || d < 0 {
-		return 0, fmt.Errorf("invalid age %q (use 30d, 24h, ...)", s)
-	}
-	return d, nil
-}
-
-// runSandboxProbes exercises the live sandbox with a hostile tool and checks
-// the containment holds: writes outside CWD are blocked, CWD writes work,
-// network is denied by default and permitted only with a grant. This turns
-// the ad-hoc escape tests into a first-class, on-demand check (`verify
-// --sandbox`) that runs against whatever mechanism is active on this host.
-func runSandboxProbes(p config.Paths) []verifyResult {
-	var out []verifyResult
-	work, err := os.MkdirTemp("", "smith-probe-")
-	if err != nil {
-		return []verifyResult{{Check: "sandbox:setup", OK: false, Detail: err.Error()}}
 	}
 	defer os.RemoveAll(work)
-
-	home, _ := os.UserHomeDir()
-	marker := filepath.Join(home, ".smith-escape-probe")
-	os.Remove(marker)
-	defer os.Remove(marker)
-
-	runProbe := func(perms sandbox.Perms, script string) (string, error) {
-		sp := filepath.Join(work, "probe.sh")
-		if err := os.WriteFile(sp, []byte(script), 0o755); err != nil {
-			return "", err
-		}
-		argv, err := sandbox.Command(p.SandboxProfiles, work, perms, []string{"/bin/bash", sp})
-		if err != nil {
-			return "", err
-		}
-		cmd := exec.Command(argv[0], argv[1:]...)
-		cmd.Dir = work
-		cmd.Env, _ = sandbox.Env(nil)
-		b, _ := cmd.CombinedOutput()
-		return string(b), nil
-	}
-
-	// Write confinement: escaping to $HOME must fail; CWD write must work.
-	wOut, err := runProbe(sandbox.Perms{}, "#!/bin/bash\n"+
-		"touch \""+marker+"\" 2>/dev/null && echo WROTE_HOME || echo home_blocked\n"+
-		"touch ./cwd_ok 2>/dev/null && echo cwd_ok || echo cwd_blocked\n")
-	switch {
-	case err != nil:
-		out = append(out, verifyResult{Check: "sandbox:write-confinement", OK: false, Detail: err.Error()})
-	case strings.Contains(wOut, "WROTE_HOME"):
-		out = append(out, verifyResult{Check: "sandbox:write-confinement", OK: false, Detail: "ESCAPED: wrote outside CWD to $HOME"})
-	case !strings.Contains(wOut, "cwd_ok"):
-		out = append(out, verifyResult{Check: "sandbox:write-confinement", OK: false, Detail: "CWD write unexpectedly blocked"})
-	default:
-		out = append(out, verifyResult{Check: "sandbox:write-confinement", OK: true})
-	}
-
-	// Network probes only run if the host itself has network (else we can't
-	// distinguish "denied" from "offline"). The deny check is security-
-	// critical; the grant check confirms the opt-in mechanism works.
-	netScript := "#!/bin/bash\ncurl -sS --max-time 6 https://example.com -o /dev/null && echo NET || echo nonet\n"
-	baseline := exec.Command("/bin/bash", "-c", "curl -sS --max-time 6 https://example.com -o /dev/null && echo NET || echo nonet")
-	base, _ := baseline.CombinedOutput()
-	if !strings.Contains(string(base), "NET") {
-		out = append(out, verifyResult{Check: "sandbox:network", OK: true, Detail: "skipped (host has no network baseline)"})
-		return out
-	}
-	if denyOut, err := runProbe(sandbox.Perms{}, netScript); err != nil {
-		out = append(out, verifyResult{Check: "sandbox:network-deny", OK: false, Detail: err.Error()})
-	} else if strings.Contains(denyOut, "NET") {
-		out = append(out, verifyResult{Check: "sandbox:network-deny", OK: false, Detail: "ESCAPED: network reachable under strict default"})
-	} else {
-		out = append(out, verifyResult{Check: "sandbox:network-deny", OK: true})
-	}
-	if grantOut, err := runProbe(sandbox.Perms{Network: true}, netScript); err != nil {
-		out = append(out, verifyResult{Check: "sandbox:network-grant", OK: false, Detail: err.Error()})
-	} else if !strings.Contains(grantOut, "NET") {
-		out = append(out, verifyResult{Check: "sandbox:network-grant", OK: false, Detail: "grant did not enable network"})
-	} else {
-		out = append(out, verifyResult{Check: "sandbox:network-grant", OK: true})
-	}
-	return out
-}
-
-// ---------------------------------------------------------------- verify
-
-type verifyResult struct {
-	Tool    string `json:"tool"`
-	Version string `json:"version"`
-	Check   string `json:"check"`
-	OK      bool   `json:"ok"`
-	Detail  string `json:"detail,omitempty"`
-}
-
-func cmdVerify(p config.Paths, args []string) error {
-	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "machine-readable output")
-	sandboxCheck := fs.Bool("sandbox", false, "additionally run the hostile-tool escape battery against the live sandbox")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	var results []verifyResult
-	add := func(r verifyResult) { results = append(results, r) }
-
-	if *sandboxCheck {
-		for _, r := range runSandboxProbes(p) {
-			add(r)
-		}
-	}
-
-	// Every per-machine provenance chain must verify.
-	logs, _ := filepath.Glob(filepath.Join(filepath.Dir(p.ProvenanceLog), "*.jsonl"))
-	for _, lg := range logs {
-		n, err := provenance.VerifyChain(lg)
-		label := "provenance-chain:" + strings.TrimSuffix(filepath.Base(lg), ".jsonl")
-		if err != nil {
-			add(verifyResult{Check: label, OK: false, Detail: err.Error()})
-		} else {
-			add(verifyResult{Check: label, OK: true, Detail: fmt.Sprintf("%d entries", n)})
-		}
-	}
-
-	// Index signature over the manifest set (present only after first publish).
-	if present, err := sign.VerifyIndex(p.Home, p.IndexTools); present {
-		if err != nil {
-			add(verifyResult{Check: "index-signature", OK: false, Detail: err.Error()})
-		} else {
-			add(verifyResult{Check: "index-signature", OK: true})
-		}
-	} else {
-		add(verifyResult{Check: "index-signature", OK: true, Detail: "not yet published (unsigned)"})
-	}
-
-	entries, err := index.List(p.IndexTools)
+	argv, err := sandbox.Command(p.SandboxProfiles, work, sandbox.Perms{}, []string{"/bin/bash", st, entry})
 	if err != nil {
 		return err
 	}
-	for _, e := range entries {
-		base := store.QuarantineDir(p.StoreQuarantine, e.Name, e.Version)
-		if e.Tier == 1 {
-			base = store.TrustedDir(p.StoreTrusted, e.Name, e.Version)
-		}
-		// An entry in the index but not materialized on this machine (fresh
-		// clone, or a not-yet-fetched Tier-1 tool / Locked stub) has nothing
-		// on disk to check — report it informationally, not as a pile of
-		// missing-file failures.
-		if _, statErr := os.Stat(base); os.IsNotExist(statErr) {
-			add(verifyResult{Tool: e.Name, Version: e.Version, Check: "not-fetched", OK: true, Detail: "in index; `smith fetch` to materialize"})
-			continue
-		}
-		checkSet := append(append([]index.Artifact{}, effectiveArtifacts(e, base)...), e.Docs...)
-		for _, a := range checkSet {
-			path := filepath.Join(base, a.Path)
-			sum, err := store.HashFile(path)
-			switch {
-			case err != nil:
-				add(verifyResult{Tool: e.Name, Version: e.Version, Check: "sha256:" + a.Path, OK: false, Detail: "missing: " + path})
-			case sum != a.Sha256:
-				add(verifyResult{Tool: e.Name, Version: e.Version, Check: "sha256:" + a.Path, OK: false, Detail: "MISMATCH pinned=" + a.Sha256 + " actual=" + sum})
-			default:
-				add(verifyResult{Tool: e.Name, Version: e.Version, Check: "sha256:" + a.Path, OK: true})
-			}
-		}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = work
+	cmd.Env, err = sandbox.Env(nil)
+	if err != nil {
+		return err
 	}
-
-	// PATH hygiene: quarantine must not be reachable from the live PATH, and
-	// every trusted-bin symlink must resolve into the trusted store.
-	if pathTouchesQuarantine(os.Getenv("PATH"), p.StoreQuarantine) {
-		add(verifyResult{Check: "path-hygiene", OK: false, Detail: "quarantine dir is on PATH"})
-	} else {
-		add(verifyResult{Check: "path-hygiene", OK: true})
-	}
-	if links, err := os.ReadDir(p.TrustedBin); err == nil {
-		for _, l := range links {
-			full := filepath.Join(p.TrustedBin, l.Name())
-			target, err := filepath.EvalSymlinks(full)
-			trustedRoot, _ := filepath.EvalSymlinks(p.StoreTrusted)
-			if err != nil || !strings.HasPrefix(target, trustedRoot+string(filepath.Separator)) {
-				add(verifyResult{Check: "trusted-bin:" + l.Name(), OK: false, Detail: "symlink escapes trusted store"})
-			} else {
-				add(verifyResult{Check: "trusted-bin:" + l.Name(), OK: true})
-			}
-		}
-	}
-
-	failed := 0
-	for _, r := range results {
-		if !r.OK {
-			failed++
-		}
-	}
-	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(results); err != nil {
-			return err
-		}
-	} else {
-		for _, r := range results {
-			mark := "ok  "
-			if !r.OK {
-				mark = "FAIL"
-			}
-			id := r.Check
-			if r.Tool != "" {
-				id = r.Tool + "@" + r.Version + " " + r.Check
-			}
-			fmt.Printf("%s  %s", mark, id)
-			if r.Detail != "" {
-				fmt.Printf("  (%s)", r.Detail)
-			}
-			fmt.Println()
-		}
-		fmt.Printf("%d checks, %d failed\n", len(results), failed)
-	}
-	if failed > 0 {
-		os.Exit(1)
-	}
-	return nil
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	fmt.Fprintf(os.Stderr, "[smith] running self-test sandboxed in %s\n", work)
+	return cmd.Run()
 }
