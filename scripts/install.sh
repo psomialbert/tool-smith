@@ -13,6 +13,7 @@
 set -eu
 
 INSTALL_DIR="${SMITH_INSTALL_DIR:-$HOME/.local/bin}"
+SKILLS_DIR="${SMITH_SKILLS_DIR:-$HOME/.claude/skills}"
 REPO="${SMITH_REPO:-psomialbert/tool-smith}"
 VERSION="${SMITH_VERSION:-latest}"
 
@@ -33,6 +34,9 @@ plat="$os-$arch"
 mkdir -p "$INSTALL_DIR"
 dest="$INSTALL_DIR/smith"
 
+skill_dst="$SKILLS_DIR/cli-creator/SKILL.md"
+mkdir -p "$SKILLS_DIR/cli-creator"
+
 if [ -f "cmd/smith/main.go" ]; then
   echo "smith: building from source ($plat)..."
   if ! command -v mise >/dev/null 2>&1; then
@@ -42,6 +46,7 @@ if [ -f "cmd/smith/main.go" ]; then
   mise exec -- go build -trimpath \
     -ldflags "-X main.version=$(git describe --tags --always 2>/dev/null || echo dev)" \
     -o "$dest" ./cmd/smith
+  install -m 0644 skills/cli-creator/SKILL.md "$skill_dst"
 else
   echo "smith: downloading release binary ($plat) from $REPO..."
   if ! command -v gh >/dev/null 2>&1; then
@@ -53,11 +58,16 @@ else
   tmp="$(mktemp -d)"
   gh release download "$tag" --repo "$REPO" --pattern "smith-$plat" --dir "$tmp"
   install -m 0755 "$tmp/smith-$plat" "$dest"
+  # cli-creator authoring skill (best-effort; older releases may not carry it)
+  if gh release download "$tag" --repo "$REPO" --pattern "cli-creator-SKILL.md" --dir "$tmp" 2>/dev/null; then
+    install -m 0644 "$tmp/cli-creator-SKILL.md" "$skill_dst"
+  fi
   rm -rf "$tmp"
 fi
 
 chmod +x "$dest"
 echo "installed: $dest ($("$dest" version 2>/dev/null || echo '?'))"
+[ -f "$skill_dst" ] && echo "installed skill: $skill_dst"
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;

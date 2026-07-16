@@ -11,6 +11,7 @@
 
 PREFIX ?= $(HOME)/.local
 BINDIR := $(PREFIX)/bin
+SKILLS_DIR ?= $(HOME)/.claude/skills
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GO := mise exec -- go
 PLATFORMS := darwin-arm64 darwin-amd64 linux-amd64 linux-arm64
@@ -24,12 +25,16 @@ install: build
 	@mkdir -p "$(BINDIR)"
 	@install -m 0755 smith "$(BINDIR)/smith"
 	@echo "installed: $(BINDIR)/smith ($(VERSION))"
+	@mkdir -p "$(SKILLS_DIR)/cli-creator"
+	@install -m 0644 skills/cli-creator/SKILL.md "$(SKILLS_DIR)/cli-creator/SKILL.md"
+	@echo "installed skill: $(SKILLS_DIR)/cli-creator/SKILL.md"
 	@case ":$$PATH:" in *":$(BINDIR):"*) ;; \
 	  *) echo "note: $(BINDIR) is not on your PATH — add it: export PATH=\"$(BINDIR):\$$PATH\"";; esac
 	@command -v mise >/dev/null 2>&1 || echo "note: mise not found on PATH — smith needs it (https://mise.jdx.dev)"
 
 uninstall:
 	@rm -f "$(BINDIR)/smith" && echo "removed $(BINDIR)/smith"
+	@rm -rf "$(SKILLS_DIR)/cli-creator" && echo "removed $(SKILLS_DIR)/cli-creator"
 
 cross:
 	@mkdir -p dist
@@ -39,7 +44,8 @@ cross:
 	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 $(GO) build -trimpath \
 	    -ldflags "-X main.version=$(VERSION)" -o dist/smith-$$p ./cmd/smith || exit 1; \
 	done
-	@echo "cross-compiled $(VERSION) -> dist/"
+	@cp skills/cli-creator/SKILL.md dist/cli-creator-SKILL.md
+	@echo "cross-compiled $(VERSION) -> dist/ (binaries + cli-creator-SKILL.md)"
 
 test:
 	$(GO) test ./...
