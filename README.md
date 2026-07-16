@@ -42,11 +42,32 @@ recorded in an append-only, hash-chained provenance log.
   requirements* below). smith **fails closed** without one.
 - `git` and `gh` for cross-machine publishing (optional until you go multi-machine)
 
+## Install
+
+`smith` is a single binary; it needs [mise](https://mise.jdx.dev) on PATH at
+runtime. Pick whichever fits:
+
+```sh
+# From a clone (builds via mise+go):
+make install                       # -> ~/.local/bin/smith  (override with PREFIX=…)
+
+# On any machine with `gh` authenticated (downloads the release binary):
+sh scripts/install.sh              # auto-detects OS/arch, installs to ~/.local/bin
+#   or the one-liner, no script needed:
+gh release download v1.0.1 --repo psomialbert/tool-smith \
+  --pattern "smith-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+  -O ~/.local/bin/smith && chmod +x ~/.local/bin/smith
+```
+
+Prebuilt binaries (darwin/linux × arm64/amd64) are attached to each
+[release](https://github.com/psomialbert/tool-smith/releases). Ensure
+`~/.local/bin` is on PATH. For agents: install the binary once per machine,
+confirm `smith version` and `mise --version` both work, then point them at
+the [cli-creator skill](skills/cli-creator/SKILL.md).
+
 ## Quickstart
 
 ```sh
-mise exec -- go build -o smith ./cmd/smith    # build (Go pinned via mise.toml)
-
 smith init                     # set up ~/.toolsmith + put the trusted store on PATH here
 smith add jq@1.7.1             # external tool → Tier 2 (quarantined)
 echo '{"a":1}' | smith run jq '.a'   # runs sandboxed
