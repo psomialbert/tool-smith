@@ -33,10 +33,17 @@ import (
 	"smith/internal/transport"
 )
 
+// version is set at build time via -ldflags "-X main.version=..." (see Makefile).
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
+	}
+	if a := os.Args[1]; a == "version" || a == "--version" || a == "-v" {
+		fmt.Println("smith " + version)
+		return
 	}
 	paths, err := config.Resolve()
 	if err != nil {
