@@ -103,13 +103,18 @@ See the cli-creator skill for the agent-friendly CLI contract.
 
 ## Runtimes
 
-`smith new` scaffolds `bash`, `python` (stdlib), `go` (compiled), and
-`python-uv` (PEP 723 + hash-locked deps). `smith use` adopts `bash`, `python`,
-and `go`. For **go**, the reviewable **source** (`main.go`) is vendored and
-committed — never a binary — and `smith install` builds it locally per
-platform (git-ignored), so the PR diff stays reviewable and portable across
-teammates' platforms. (`python-uv` adoption — lock + warm at install — is the
-next runtime.)
+`smith use` adopts all four runtimes, always vendoring reviewable **source**
+(committed), never built artifacts:
+
+- **bash / python** — the script is the entrypoint; symlinked onto PATH.
+- **go** — `main.go` is vendored; `smith install` compiles it locally
+  (per-platform, git-ignored).
+- **python-uv** — `<name>.py` + its hash-locked `<name>.py.lock` are vendored
+  (the dep tree, with hashes, is in the PR); `smith install` warms a
+  git-ignored tool-local cache from the lock and writes an offline launcher.
+
+For every runtime the PR diff is reviewable source, portable across
+teammates' platforms; build/warm happens locally at install.
 
 ## Sandbox host requirements
 

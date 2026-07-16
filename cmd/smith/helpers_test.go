@@ -13,6 +13,8 @@ import (
 func testPaths(t *testing.T) config.Paths {
 	t.Helper()
 	t.Setenv("SMITH_HOME", t.TempDir())
+	// Isolate skill export so tests never touch the real ~/.claude/skills.
+	t.Setenv("SMITH_SKILLS_DIR", filepath.Join(t.TempDir(), "skills"))
 	p, err := config.Resolve()
 	if err != nil {
 		t.Fatal(err)

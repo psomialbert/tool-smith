@@ -125,6 +125,51 @@ func gitInit(t *testing.T, repo, tag string) {
 	run("tag", tag)
 }
 
+// python-uv tools: cmdUse locks + warms + vendors source (.py + .py.lock),
+// cmdInstall warms a cache + writes a launcher. Depless (no PyPI needed);
+// skips if uv can't resolve offline (no network for the python resolve).
+func TestUseInstallPythonUV(t *testing.T) {
+	requireSandbox(t)
+	for _, b := range []string{"git", "uv"} {
+		if _, err := exec.LookPath(b); err != nil {
+			t.Skipf("%s not available", b)
+		}
+	}
+	p := testPaths(t)
+	repo := filepath.Join(t.TempDir(), "puv-repo")
+	if err := scaffold.Create(repo, scaffold.Manifest{
+		Name: "puv", Version: "0.1.0", Description: "python-uv tool", Runtime: "python-uv",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, repo, "v0.1.0")
+
+	proj := t.TempDir()
+	t.Chdir(proj)
+	if err := cmdUse(p, []string{repo + "@v0.1.0"}); err != nil {
+		t.Skipf("python-uv use needs uv to resolve (network?): %v", err)
+	}
+	for _, f := range []string{"puv.py", "puv.py.lock"} { // source + hash-lock vendored
+		if _, err := os.Stat(filepath.Join(smithDir, "tools", "puv", f)); err != nil {
+			t.Fatalf("expected vendored %s: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(smithDir, "tools", "puv", "uv-cache")); err == nil {
+		t.Fatal("cache was vendored (should be source-only)")
+	}
+	if err := cmdInstall(p, nil); err != nil {
+		t.Fatalf("smith install (python-uv): %v", err)
+	}
+	// Launcher is a regular executable (not a symlink), cache is git-ignored.
+	fi, err := os.Lstat(filepath.Join(smithDir, "bin", "puv"))
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("expected a launcher file at .smith/bin/puv: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(smithDir, "cache", "puv")); err != nil {
+		t.Fatal("warmed cache dir missing")
+	}
+}
+
 // End-to-end through cmdUse + cmdInstall against a local git tool repo.
 func TestUseInstallLocalRepo(t *testing.T) {
 	requireSandbox(t)

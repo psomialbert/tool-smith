@@ -26,6 +26,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"smith/internal/config"
+	"smith/internal/sandbox"
 	"smith/internal/scaffold"
 )
 
@@ -132,6 +133,53 @@ func buildGoTool(dir, outAbs string) error {
 	return cmd.Run()
 }
 
+// uvLockScript runs `uv lock --script` if the lockfile is absent, so the
+// vendored source carries a hash-locked dependency tree.
+func uvLockScript(dir, scriptRel string) error {
+	if _, err := os.Stat(filepath.Join(dir, scriptRel+".lock")); err == nil {
+		return nil
+	}
+	cmd := exec.Command("uv", "lock", "--script", scriptRel)
+	cmd.Dir = dir
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	return cmd.Run()
+}
+
+// warmUVCache populates cacheAbs by resolving+installing the script's locked
+// deps, in a NETWORK-allowed sandbox with a sanitized env and writes confined
+// to workdir — so dep download/build can't reach secrets. cacheAbs must sit
+// under workdir (the sandbox's writable CWD).
+func warmUVCache(p config.Paths, workdir, scriptAbs, cacheAbs string) error {
+	argv, err := sandbox.Command(p.SandboxProfiles, workdir, sandbox.Perms{Network: true},
+		[]string{"uv", "run", "--script", scriptAbs, "--version"})
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = workdir
+	env, err := sandbox.Env(nil)
+	if err != nil {
+		return err
+	}
+	cmd.Env = append(env, "UV_CACHE_DIR="+cacheAbs)
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	return cmd.Run()
+}
+
+// pythonUVLauncher runs a PEP 723 script offline from a tool-local cache. It
+// mirrors the cache to a writable temp first (a sandboxed run has the cache
+// read-only, and uv writes to its cache at run). Absolute paths are baked in
+// at generation time (regenerated each install / per self-test).
+func pythonUVLauncher(scriptAbs, cacheAbs string) string {
+	return "#!/bin/bash\nset -e\n" +
+		"cache=\"$(mktemp -d)/c\"\n" +
+		"cp -R " + shellQuote(cacheAbs) + " \"$cache\"\n" +
+		"export UV_CACHE_DIR=\"$cache\"\n" +
+		"exec uv run --offline --script " + shellQuote(scriptAbs) + " \"$@\"\n"
+}
+
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
 // expandSource turns a shorthand into a cloneable git URL. Local paths and
 // explicit URLs pass through; "owner/repo" and "github:owner/repo" become
 // GitHub HTTPS.
@@ -202,16 +250,35 @@ func cmdUse(p config.Paths, args []string) error {
 		return fmt.Errorf("%s is not a smith tool (no valid manifest.yaml): %w", source, err)
 	}
 	switch m.Runtime {
-	case "bash", "python", "go":
+	case "bash", "python", "go", "python-uv":
 	default:
-		return fmt.Errorf("runtime %q not yet supported by `smith use` (bash/python/go)", m.Runtime)
+		return fmt.Errorf("runtime %q not yet supported by `smith use` (bash/python/go/python-uv)", m.Runtime)
 	}
 
-	// Compiled runtimes build the runnable from source before the self-test.
+	// Compiled/wrapped runtimes materialize a runnable before the self-test.
 	entry := filepath.Join(clone, m.Entrypoint)
-	if m.Runtime == "go" {
+	switch m.Runtime {
+	case "go":
 		if err := buildGoTool(clone, entry); err != nil {
 			return fmt.Errorf("go build failed — not adopted: %w", err)
+		}
+	case "python-uv":
+		if _, err := exec.LookPath("uv"); err != nil {
+			return fmt.Errorf("uv not found on PATH (required for python-uv tools)")
+		}
+		script := m.Name + ".py"
+		if err := uvLockScript(clone, script); err != nil {
+			return fmt.Errorf("uv lock failed — not adopted: %w", err)
+		}
+		cacheAbs, _ := filepath.Abs(filepath.Join(clone, "uv-cache"))
+		scriptAbs, _ := filepath.Abs(filepath.Join(clone, script))
+		if err := warmUVCache(p, clone, scriptAbs, cacheAbs); err != nil {
+			return fmt.Errorf("warming uv cache failed — not adopted: %w", err)
+		}
+		// Self-test runs the offline launcher (mirrors cache, no network).
+		entry = filepath.Join(clone, ".smith-launch")
+		if err := os.WriteFile(entry, []byte(pythonUVLauncher(scriptAbs, cacheAbs)), 0o755); err != nil {
+			return err
 		}
 	}
 	if err := os.Chmod(entry, 0o755); err != nil {
@@ -322,6 +389,24 @@ func cmdInstall(p config.Paths, args []string) error {
 			if err := buildGoTool(dir, filepath.Join(absBinEarly, name)); err != nil {
 				return fmt.Errorf("%s: go build failed: %w", name, err)
 			}
+		case "python-uv":
+			// Warm a git-ignored tool-local cache from the hash-locked deps,
+			// then write an offline launcher onto the bin.
+			if _, err := exec.LookPath("uv"); err != nil {
+				return fmt.Errorf("%s: uv not found on PATH", name)
+			}
+			scriptAbs, _ := filepath.Abs(filepath.Join(dir, name+".py"))
+			cacheAbs, _ := filepath.Abs(filepath.Join(smithDir, "cache", name))
+			if err := os.MkdirAll(cacheAbs, 0o755); err != nil {
+				return err
+			}
+			cwd, _ := os.Getwd()
+			if err := warmUVCache(p, cwd, scriptAbs, cacheAbs); err != nil {
+				return fmt.Errorf("%s: warming uv cache failed: %w", name, err)
+			}
+			if err := os.WriteFile(link, []byte(pythonUVLauncher(scriptAbs, cacheAbs)), 0o755); err != nil {
+				return err
+			}
 		default: // bash / python — the entrypoint IS the script
 			if err := os.Chmod(filepath.Join(dir, t.Entrypoint), 0o755); err != nil {
 				return err
@@ -372,19 +457,30 @@ func jsonPrint(v any) error {
 
 func ensureProjectGitignore() {
 	gi := ".gitignore"
-	want := smithDir + "/bin/"
 	raw, _ := os.ReadFile(gi)
-	for _, l := range strings.Split(string(raw), "\n") {
-		if strings.TrimSpace(l) == want {
-			return
+	content := string(raw)
+	has := func(want string) bool {
+		for _, l := range strings.Split(content, "\n") {
+			if strings.TrimSpace(l) == want {
+				return true
+			}
+		}
+		return false
+	}
+	// .smith/bin (symlinks + built binaries) and .smith/cache (warmed uv
+	// caches) are generated per machine; the vendored source + lockfile are
+	// what's committed.
+	for _, want := range []string{smithDir + "/bin/", smithDir + "/cache/"} {
+		if !has(want) {
+			if content != "" && !strings.HasSuffix(content, "\n") {
+				content += "\n"
+			}
+			content += want + "\n"
 		}
 	}
-	content := string(raw)
-	if content != "" && !strings.HasSuffix(content, "\n") {
-		content += "\n"
+	if content != string(raw) {
+		_ = os.WriteFile(gi, []byte(content), 0o644)
 	}
-	content += want + "\n"
-	_ = os.WriteFile(gi, []byte(content), 0o644)
 }
 
 // ---------------------------------------------------------------- smith search
