@@ -104,9 +104,12 @@ See the cli-creator skill for the agent-friendly CLI contract.
 ## Runtimes
 
 `smith new` scaffolds `bash`, `python` (stdlib), `go` (compiled), and
-`python-uv` (PEP 723 + hash-locked deps). `smith use` currently adopts
-interpreted tools (bash/python); compiled/deps runtimes (build/warm on adopt)
-are a follow-up.
+`python-uv` (PEP 723 + hash-locked deps). `smith use` adopts `bash`, `python`,
+and `go`. For **go**, the reviewable **source** (`main.go`) is vendored and
+committed — never a binary — and `smith install` builds it locally per
+platform (git-ignored), so the PR diff stays reviewable and portable across
+teammates' platforms. (`python-uv` adoption — lock + warm at install — is the
+next runtime.)
 
 ## Sandbox host requirements
 

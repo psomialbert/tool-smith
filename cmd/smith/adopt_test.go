@@ -29,16 +29,17 @@ func TestBundleHashDeterministicAndSensitive(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "greet"), []byte("#!/bin/sh\necho hi\n"), 0o755)
 	os.WriteFile(filepath.Join(dir, "manifest.yaml"), []byte("name: greet\n"), 0o644)
-	h1, err := bundleHash(dir, "greet")
+	files := []string{"greet", "manifest.yaml"}
+	h1, err := bundleHash(dir, files)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h2, _ := bundleHash(dir, "greet")
+	h2, _ := bundleHash(dir, files)
 	if h1 != h2 {
 		t.Fatal("bundleHash not deterministic")
 	}
 	os.WriteFile(filepath.Join(dir, "greet"), []byte("#!/bin/sh\necho evil\n"), 0o755)
-	h3, _ := bundleHash(dir, "greet")
+	h3, _ := bundleHash(dir, files)
 	if h3 == h1 {
 		t.Fatal("bundleHash did not change when a file changed")
 	}
@@ -64,6 +65,64 @@ func TestProjLockRoundtrip(t *testing.T) {
 	if l, err := loadProjLock(); err != nil || len(l.Tools) != 0 {
 		t.Fatalf("empty project: %v %+v", err, l.Tools)
 	}
+}
+
+// Go tools: cmdUse vendors main.go (source, reviewable), cmdInstall builds it.
+func TestUseInstallGoTool(t *testing.T) {
+	requireSandbox(t)
+	for _, b := range []string{"git", "go"} {
+		if _, err := exec.LookPath(b); err != nil {
+			t.Skipf("%s not available", b)
+		}
+	}
+	p := testPaths(t)
+	repo := filepath.Join(t.TempDir(), "hasher-repo")
+	if err := scaffold.Create(repo, scaffold.Manifest{
+		Name: "hasher", Version: "0.1.0", Description: "go tool", Runtime: "go",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, repo, "v0.1.0")
+
+	proj := t.TempDir()
+	t.Chdir(proj)
+	if err := cmdUse(p, []string{repo + "@v0.1.0"}); err != nil {
+		t.Fatalf("smith use (go): %v", err)
+	}
+	// Vendored source is main.go, NOT a compiled binary.
+	if _, err := os.Stat(filepath.Join(smithDir, "tools", "hasher", "main.go")); err != nil {
+		t.Fatal("go source main.go not vendored")
+	}
+	if _, err := os.Stat(filepath.Join(smithDir, "tools", "hasher", "hasher")); err == nil {
+		t.Fatal("a built binary was vendored (should be source-only)")
+	}
+	if lock, _ := loadProjLock(); lock.Tools["hasher"].Runtime != "go" {
+		t.Fatal("lockfile runtime not go")
+	}
+	// Install builds a real binary onto the project bin (not a symlink).
+	if err := cmdInstall(p, nil); err != nil {
+		t.Fatalf("smith install (go): %v", err)
+	}
+	fi, err := os.Lstat(filepath.Join(smithDir, "bin", "hasher"))
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || fi.Mode()&0o111 == 0 {
+		t.Fatalf("expected a built executable at .smith/bin/hasher, got %v", fi.Mode())
+	}
+}
+
+func gitInit(t *testing.T, repo, tag string) {
+	t.Helper()
+	run := func(args ...string) {
+		c := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("add", "-A")
+	run("commit", "-qm", "tool")
+	run("tag", tag)
 }
 
 // End-to-end through cmdUse + cmdInstall against a local git tool repo.

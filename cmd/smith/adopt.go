@@ -80,17 +80,32 @@ func saveProjLock(l ProjLock) error {
 	return os.WriteFile(lockPath(), raw, 0o644)
 }
 
-// bundleFilesFor lists the tool-bundle files (that carry integrity), relative
-// to a bundle dir. Only these are vendored + hashed.
-var bundleParts = []string{"manifest.yaml", "selftest.sh", "SKILL.md"}
+// metaParts are the non-source bundle files every tool carries.
+var metaParts = []string{"manifest.yaml", "selftest.sh", "SKILL.md"}
 
-// bundleHash hashes a tool bundle deterministically: sorted "<rel>\0<sha>\n".
-// It covers the entrypoint plus the standard bundle parts that exist.
-func bundleHash(dir, entrypoint string) (string, error) {
-	files := append([]string{entrypoint}, bundleParts...)
-	sort.Strings(files)
+// sourceFiles lists the files that make up a tool's *reviewable source* — what
+// gets vendored (committed) and hashed. For compiled/wrapped runtimes this is
+// the source, not the built artifact: go vendors main.go (built at install),
+// python-uv vendors the script + its hash-lock (deps warmed at install).
+func sourceFiles(runtime, entrypoint, name string) []string {
+	var src []string
+	switch runtime {
+	case "go":
+		src = []string{"main.go"}
+	case "python-uv":
+		src = []string{name + ".py", name + ".py.lock"}
+	default:
+		src = []string{entrypoint}
+	}
+	return append(src, metaParts...)
+}
+
+// bundleHash hashes a set of files deterministically: sorted "<rel>\0<sha>\n".
+func bundleHash(dir string, files []string) (string, error) {
+	fs := append([]string(nil), files...)
+	sort.Strings(fs)
 	h := sha256.New()
-	for _, f := range files {
+	for _, f := range fs {
 		data, err := os.ReadFile(filepath.Join(dir, f))
 		if os.IsNotExist(err) {
 			continue
@@ -102,6 +117,19 @@ func bundleHash(dir, entrypoint string) (string, error) {
 		fmt.Fprintf(h, "%s\x00%s\n", f, hex.EncodeToString(fh[:]))
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// buildGoTool compiles dir/main.go into outAbs, offline (GOPROXY=off) and
+// without cgo. The Go toolchain is trusted; review reads the vendored main.go.
+func buildGoTool(dir, outAbs string) error {
+	if _, err := exec.LookPath("go"); err != nil {
+		return fmt.Errorf("go toolchain not found on PATH")
+	}
+	cmd := exec.Command("go", "build", "-trimpath", "-o", outAbs, "main.go")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOPROXY=off", "GOFLAGS=-mod=mod")
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	return cmd.Run()
 }
 
 // expandSource turns a shorthand into a cloneable git URL. Local paths and
@@ -173,10 +201,19 @@ func cmdUse(p config.Paths, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%s is not a smith tool (no valid manifest.yaml): %w", source, err)
 	}
-	if m.Runtime != "bash" && m.Runtime != "python" {
-		return fmt.Errorf("runtime %q not yet supported by `smith use` (bash/python only for now)", m.Runtime)
+	switch m.Runtime {
+	case "bash", "python", "go":
+	default:
+		return fmt.Errorf("runtime %q not yet supported by `smith use` (bash/python/go)", m.Runtime)
 	}
+
+	// Compiled runtimes build the runnable from source before the self-test.
 	entry := filepath.Join(clone, m.Entrypoint)
+	if m.Runtime == "go" {
+		if err := buildGoTool(clone, entry); err != nil {
+			return fmt.Errorf("go build failed — not adopted: %w", err)
+		}
+	}
 	if err := os.Chmod(entry, 0o755); err != nil {
 		return fmt.Errorf("entrypoint %s: %w", m.Entrypoint, err)
 	}
@@ -188,7 +225,8 @@ func cmdUse(p config.Paths, args []string) error {
 		return fmt.Errorf("self-test FAILED — not adopted: %w", err)
 	}
 
-	// Vendor the bundle into the project.
+	// Vendor the reviewable SOURCE (not built artifacts) into the project.
+	src := sourceFiles(m.Runtime, m.Entrypoint, m.Name)
 	dst := filepath.Join(smithDir, "tools", m.Name)
 	if err := os.RemoveAll(dst); err != nil {
 		return err
@@ -196,7 +234,7 @@ func cmdUse(p config.Paths, args []string) error {
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return err
 	}
-	for _, f := range append([]string{m.Entrypoint}, bundleParts...) {
+	for _, f := range src {
 		raw, rerr := os.ReadFile(filepath.Join(clone, f))
 		if os.IsNotExist(rerr) {
 			continue
@@ -212,7 +250,7 @@ func cmdUse(p config.Paths, args []string) error {
 			return err
 		}
 	}
-	sum, err := bundleHash(dst, m.Entrypoint)
+	sum, err := bundleHash(dst, src)
 	if err != nil {
 		return err
 	}
@@ -258,33 +296,42 @@ func cmdInstall(p config.Paths, args []string) error {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	absBinEarly, err := filepath.Abs(binDir)
+	if err != nil {
+		return err
+	}
 	for _, name := range names {
 		t := lock.Tools[name]
 		dir := filepath.Join(smithDir, "tools", name)
-		// Integrity: vendored bytes must match the pinned hash (catches a
+		// Integrity: vendored source must match the pinned hash (catches a
 		// tampered/edited vendored tree vs the reviewed lockfile).
-		sum, herr := bundleHash(dir, t.Entrypoint)
+		src := sourceFiles(t.Runtime, t.Entrypoint, name)
+		sum, herr := bundleHash(dir, src)
 		if herr != nil {
 			return fmt.Errorf("%s: %w", name, herr)
 		}
 		if sum != t.Sha256 {
 			return fmt.Errorf("%s: vendored source sha mismatch (pinned %s, got %s) — review %s and re-adopt", name, t.Sha256[:12], sum[:12], dir)
 		}
-		if err := os.Chmod(filepath.Join(dir, t.Entrypoint), 0o755); err != nil {
-			return err
-		}
 		link := filepath.Join(binDir, name)
-		target := filepath.Join("..", "tools", name, t.Entrypoint) // relative
 		_ = os.Remove(link)
-		if err := os.Symlink(target, link); err != nil {
-			return err
+		// Materialize the runnable per runtime.
+		switch t.Runtime {
+		case "go":
+			// Build the vendored source locally (per-platform, git-ignored).
+			if err := buildGoTool(dir, filepath.Join(absBinEarly, name)); err != nil {
+				return fmt.Errorf("%s: go build failed: %w", name, err)
+			}
+		default: // bash / python — the entrypoint IS the script
+			if err := os.Chmod(filepath.Join(dir, t.Entrypoint), 0o755); err != nil {
+				return err
+			}
+			if err := os.Symlink(filepath.Join("..", "tools", name, t.Entrypoint), link); err != nil {
+				return err
+			}
 		}
 	}
-	absBin, err := filepath.Abs(binDir)
-	if err != nil {
-		return err
-	}
-	if err := ensureActivation(".", absBin); err != nil {
+	if err := ensureActivation(".", absBinEarly); err != nil {
 		return err
 	}
 	// .smith/bin is generated; keep it out of the repo (the vendored source
