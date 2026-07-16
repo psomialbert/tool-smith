@@ -92,6 +92,42 @@ smith fetch greet@0.1.0        # signature + checksums verified → Tier 1, on P
 signed index git repo; the code repo (this directory) is separate. See
 `toolsmith-spec.md` for the full spec and `ROADMAP.md` for what's next.
 
+## Using smith with agents
+
+smith is built for the pattern where an **agent authors and reuses its own
+CLIs** but a **human owns the trust decision**. The division of labor is the
+whole safety model — keep it:
+
+| Agents may | Humans only |
+|---|---|
+| `new`, `register` (→ Tier 0), `add` (→ Tier 2), `run` (sandboxed), `review` (read), `fetch`, `list`, `verify` | `promote`, `demote`, `publish`, `key` |
+
+An agent's job ends at **emitting the promotion request** — it never promotes.
+`smith promote` is gated on an interactive terminal, so a non-interactive
+agent shell can't promote even by accident; but the rule is also social, so
+state it in your agent's instructions. The load-bearing gate is a human
+reading the source (`smith review`) before promoting; a passing self-test is
+necessary, never sufficient.
+
+To make your agents smith-aware, add something like this to your agent
+instructions (e.g. `~/.claude/CLAUDE.md` for Claude Code):
+
+```markdown
+# smith (agent tool store)
+`smith` keeps reusable CLIs behind a trust gate. If a tool would help and
+doesn't exist, author one: `smith new <name> --runtime bash|python|go|python-uv`,
+implement it, then `smith register <name>` (sandboxed self-test → Tier 0).
+Run tools with `smith run <name>` (Tier 0/2 run sandboxed). You may `smith add
+<ext>@<ver>` for external tools. Do NOT promote/publish — emit the promotion
+request and stop; a human reviews and promotes. See the cli-creator skill for
+the agent-friendly CLI contract.
+```
+
+The authoring contract (structured `--json` output, non-interactive, stable
+flags, self-test) lives in [`skills/cli-creator/SKILL.md`](skills/cli-creator/SKILL.md);
+point authoring agents there. Promoted tools' own `SKILL.md`s are exported to
+`~/.claude/skills/<name>/` on promotion, so future sessions discover them.
+
 ## Command reference
 
 All spec phases (0–3) plus the v0.2–v1.0 roadmap are implemented and tested

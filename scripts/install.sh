@@ -65,3 +65,4 @@ case ":$PATH:" in
 esac
 command -v mise >/dev/null 2>&1 || \
   echo "note: mise not found — smith needs it to run (https://mise.jdx.dev)"
+echo "next: run \`smith init\` in a project; see the README 'Using smith with agents' for the agent workflow + trust rules."
