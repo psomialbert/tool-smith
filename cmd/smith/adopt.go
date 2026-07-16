@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -198,6 +199,52 @@ func expandSource(s string) string {
 	return s
 }
 
+// allowlistPatterns returns the org's permitted-source patterns: config
+// allowlist.repos plus lines from allowlist.file. Empty = no policy.
+func allowlistPatterns(fc config.FileConfig) ([]string, error) {
+	pats := append([]string(nil), fc.Allowlist.Repos...)
+	if fc.Allowlist.File != "" {
+		raw, err := os.ReadFile(fc.Allowlist.File)
+		if err != nil {
+			return nil, fmt.Errorf("reading allowlist file %s: %w", fc.Allowlist.File, err)
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+				pats = append(pats, line)
+			}
+		}
+	}
+	return pats, nil
+}
+
+// allowlistPermits reports whether source (or its expanded URL) matches any
+// pattern. Matching is glob (path.Match) against the raw arg, the expanded
+// URL, and the scheme/.git-stripped form, so "github.com/acme/*" matches
+// "github:acme/x", "https://github.com/acme/x", and ".../acme/x.git".
+func allowlistPermits(pats []string, source, expanded string) bool {
+	cands := map[string]bool{}
+	for _, c := range []string{source, expanded} {
+		cands[c] = true
+		c = strings.TrimSuffix(c, ".git")
+		cands[c] = true
+		if i := strings.Index(c, "://"); i >= 0 {
+			cands[c[i+3:]] = true
+		}
+		cands[strings.TrimPrefix(c, "github:")] = true
+	}
+	for _, p := range pats {
+		for c := range cands {
+			if p == c {
+				return true
+			}
+			if ok, _ := path.Match(p, c); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ---------------------------------------------------------------- smith use
 
 func cmdUse(p config.Paths, args []string) error {
@@ -222,6 +269,15 @@ func cmdUse(p config.Paths, args []string) error {
 		}
 	}
 	clonedURL := expandSource(source)
+
+	// Org policy: refuse (before cloning) sources the allowlist doesn't permit.
+	fc, _ := p.LoadFileConfig()
+	if pats, perr := allowlistPatterns(fc); perr != nil {
+		return perr
+	} else if len(pats) > 0 && !allowlistPermits(pats, source, clonedURL) {
+		return fmt.Errorf("adoption blocked: %q matches no allowlist pattern.\n  allowed: %s\n  (policy in %s)",
+			source, strings.Join(pats, ", "), filepath.Join(p.Home, "config.yaml"))
+	}
 
 	tmp, err := os.MkdirTemp("", "smith-use-")
 	if err != nil {

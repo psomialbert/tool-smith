@@ -143,9 +143,31 @@ directory) is separate.
 
 No public contribution hub, no multi-user governance/RBAC, no GUI, no
 auto-adopt. The prompt-injection → malware risk means public discovery is
-open but *adoption stays a reviewed decision*. A signed **allowlist** (which
-repos an org permits adopting) is a planned optional policy layer. See
-`ROADMAP.md`.
+open but *adoption stays a reviewed decision*. See `ROADMAP.md`.
+
+## Org allowlist (optional)
+
+A company can restrict which repos may be adopted — even with a PR — via an
+allowlist in `$SMITH_HOME/config.yaml` (provisioned per machine, so a project
+PR can't change it):
+
+```yaml
+allowlist:
+  repos: ["github.com/acme/*", "github.com/acme-tools/lint"]
+  # file: /etc/smith/allowlist.txt   # or a managed file, one pattern per line
+```
+
+`smith use` refuses (before cloning) any source that matches no pattern;
+`smith allowlist` shows the effective policy. Absent = adopt anything. This
+is a policy layer on top of the per-project review, for orgs that want central
+control. (Signing the allowlist for tamper-evident distribution is future.)
+
+## Updating an adopted tool
+
+Re-run `smith use <repo>@<newver>` — it re-vendors the source, re-runs the
+sandboxed self-test, and updates the pin in `.smith/tools.yaml`. The version
+bump is a reviewable diff like the original adoption; `smith install` picks it
+up.
 
 ## Build & test
 

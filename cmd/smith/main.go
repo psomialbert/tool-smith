@@ -57,6 +57,8 @@ func main() {
 		err = cmdReview(paths, args)
 	case "list", "status":
 		err = cmdList(paths, args)
+	case "allowlist":
+		err = cmdAllowlist(paths, args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -88,6 +90,7 @@ Usage:
                                  read a tool's source (interactive TUI) before adopting
   smith install                  realize .smith/tools.yaml onto the project PATH
   smith list                     list tools adopted in this project
+  smith allowlist                show the org adoption policy (if any)
   smith version                  print version
 
 Trust is per-project: a tool vendored + pinned in the reviewed .smith/tools.yaml
@@ -199,6 +202,31 @@ func cmdList(p config.Paths, args []string) error {
 		t := lock.Tools[n]
 		fmt.Printf("%-16s %-10s %-10s %s\n", n, t.Version, t.Runtime, installed(n))
 	}
+	return nil
+}
+
+// ---------------------------------------------------------------- allowlist
+
+func cmdAllowlist(p config.Paths, args []string) error {
+	fc, err := p.LoadFileConfig()
+	if err != nil {
+		return err
+	}
+	pats, err := allowlistPatterns(fc)
+	if err != nil {
+		return err
+	}
+	cfg := filepath.Join(p.Home, "config.yaml")
+	if len(pats) == 0 {
+		fmt.Printf("no allowlist configured — any tool repo may be adopted.\n")
+		fmt.Printf("to restrict, add to %s:\n  allowlist:\n    repos: [\"github.com/your-org/*\"]\n", cfg)
+		return nil
+	}
+	fmt.Printf("adoption allowlist (from %s):\n", cfg)
+	for _, pat := range pats {
+		fmt.Printf("  %s\n", pat)
+	}
+	fmt.Println("only sources matching a pattern can be `smith use`d on this machine.")
 	return nil
 }
 

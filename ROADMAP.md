@@ -12,13 +12,19 @@ Deleted: the index/publish/fetch/sync/gc/key/promote/demote/add/register/
 upgrade commands and the internal index/sign/transport/provenance/attest/
 misex/store packages.
 
+**Shipped since v2.0:**
+- ~~`smith use` for go~~ (v2.1) and ~~python-uv~~ (v2.2) — all runtimes; vendor
+  reviewable source, build/warm locally at install.
+- ~~Optional allowlist~~ (v2.3) — `allowlist.repos`/`file` in SMITH_HOME
+  config; `smith use` refuses non-matching sources; `smith allowlist` shows it.
+- ~~Update flow~~ — re-`smith use <repo>@<newver>` re-vendors + re-pins.
+
 **Next for v2:**
-- `smith use` for compiled/deps runtimes (go build / python-uv warm at adopt).
 - Real GitHub tool repos + the `smith-tool` topic so `smith search` returns
-  results (publish `calc`/`det-canary` as public/org repos).
-- Optional signed **allowlist** (which repos an org permits adopting) — a
-  policy layer reusing the ed25519 signing approach from the retired index.
-- `smith use --ref <branch>` / update flow (re-`use` at a new version).
+  results (publish `calc`/`det-canary` as public/org repos — needs repo names
+  Albert chooses).
+- Sign the allowlist (ed25519) for tamper-evident distribution without git.
+- `smith use --ref <branch>` (adopt a branch tip, not just a tag).
 - Sandbox v2 (macOS microVM / Linux Landlock) for restricted hosts.
 
 The sections below are **historical** — the v0.2–v1.0 work on the (now

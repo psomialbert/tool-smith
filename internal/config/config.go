@@ -47,6 +47,15 @@ type FileConfig struct {
 	Review ReviewConfig `yaml:"review,omitempty"`
 	// Skills configures where adopted tools' SKILL.md files are exported.
 	Skills SkillsConfig `yaml:"skills,omitempty"`
+	// Allowlist is an optional org policy: only sources matching it may be
+	// adopted with `smith use`. Lives in $SMITH_HOME/config.yaml (provisioned
+	// per machine, not editable in a project PR). Absent = adopt anything.
+	Allowlist AllowlistConfig `yaml:"allowlist,omitempty"`
+}
+
+type AllowlistConfig struct {
+	Repos []string `yaml:"repos,omitempty"` // glob patterns, e.g. "github.com/acme/*"
+	File  string   `yaml:"file,omitempty"`  // path to a file of patterns (one per line)
 }
 
 type SkillsConfig struct {
