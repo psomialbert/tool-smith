@@ -95,6 +95,40 @@ smith fetch greet@0.1.0        # signature + checksums verified → Tier 1, on P
 signed index git repo; the code repo (this directory) is separate. See
 `toolsmith-spec.md` for the full spec and `ROADMAP.md` for what's next.
 
+## Adopting tools per project (v2 — the direction)
+
+The personal signed index is being **retired** in favor of a package-manager
+model: **a tool is a git repo** (public, private-org, or embedded), and you
+**adopt** it into a project the same way you'd add any dependency — a
+reviewable commit.
+
+```sh
+smith search <query>           # discover tool repos (GitHub topic: smith-tool)
+smith use <owner/repo>[@<ver>] # self-test sandboxed, vendor source into
+                               #   .smith/tools/<name>/, pin in .smith/tools.yaml
+git add .smith && git commit   # the adoption — your team reviews the tool's
+                               #   source in the PR, like any dependency
+smith install                  # realize .smith/tools.yaml onto the project PATH
+```
+
+- **Trust is per-project.** A tool vendored + pinned in the (reviewed)
+  `.smith/tools.yaml` is trusted for that project and goes on PATH (via mise);
+  the **PR review is the promotion gate**. `smith use` runs the tool's
+  self-test sandboxed before vendoring, so unreviewed code is contained at
+  adopt time; the human reviews the vendored source in the diff.
+- **Discovery ≠ trust.** `smith search` finds repos by topic; found tools are
+  only ever trusted through the adoption PR.
+- **Integrity.** `smith install` re-hashes the vendored bundle against the
+  pin and refuses on mismatch (go.sum-style). `.smith/bin/` is generated and
+  git-ignored; `.smith/tools.yaml` + `.smith/tools/<name>/` are committed.
+- A **teammate who clones the project** and runs `smith install` gets the
+  exact same tool — proven end-to-end in `scripts/adopt-e2e.sh`.
+
+Currently interpreted runtimes (bash/python); the older index commands
+(`add`/`promote`/`publish`/`fetch`/`key`) still exist but are on the way out.
+An optional signed **allowlist** (which repos an org permits adopting) is a
+planned policy layer on top. See `ROADMAP.md`.
+
 ## Using smith with agents
 
 smith is built for the pattern where an **agent authors and reuses its own

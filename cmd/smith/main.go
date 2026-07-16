@@ -79,6 +79,12 @@ func main() {
 		err = cmdKey(paths, args)
 	case "skill":
 		err = cmdSkill(paths, args)
+	case "use":
+		err = cmdUse(paths, args)
+	case "install":
+		err = cmdInstall(paths, args)
+	case "search":
+		err = cmdSearch(paths, args)
 	case "fetch":
 		err = cmdFetch(paths, args)
 	case "sync":
@@ -117,6 +123,11 @@ Usage:
   smith verify [--json]             re-check sha256 pins + provenance chain + PATH hygiene
   smith new <name> [--runtime bash|python] [--desc <text>]
                                     scaffold an agent-friendly CLI draft (cli-creator)
+
+  -- v2 (tool-as-repo, adopt per project) --
+  smith use <repo|path>[@<ver>]     adopt a tool repo into this project (vendored + pinned in .smith/tools.yaml)
+  smith install                     realize .smith/tools.yaml onto this project's PATH
+  smith search [query]              discover tool repos by the smith-tool GitHub topic
   smith upgrade <name> [--version X]   new version: authored -> seed a draft from the trusted source; external -> add newer
   smith register <name>             sandbox-run the draft's self-test; pass -> Tier 0 + promotion request
   smith publish                     sign the manifest set + commit/push the index repo
