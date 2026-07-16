@@ -59,11 +59,14 @@ gh release download v1.0.1 --repo psomialbert/tool-smith \
   -O ~/.local/bin/smith && chmod +x ~/.local/bin/smith
 ```
 
-Prebuilt binaries (darwin/linux × arm64/amd64) are attached to each
-[release](https://github.com/psomialbert/tool-smith/releases). Ensure
-`~/.local/bin` is on PATH. For agents: install the binary once per machine,
-confirm `smith version` and `mise --version` both work, then point them at
-the [cli-creator skill](skills/cli-creator/SKILL.md).
+All three paths also install the **cli-creator authoring skill** to
+`~/.claude/skills/cli-creator/` (override with `SKILLS_DIR` / `SMITH_SKILLS_DIR`),
+so authoring agents discover the CLI contract without extra setup.
+
+Prebuilt binaries (darwin/linux × arm64/amd64) plus the skill are attached to
+each [release](https://github.com/psomialbert/tool-smith/releases). Ensure
+`~/.local/bin` is on PATH. For agents: install once per machine, then confirm
+`smith version` and `mise --version` both work.
 
 ## Quickstart
 
