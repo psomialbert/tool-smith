@@ -87,6 +87,7 @@ func Create(dir string, m Manifest) error {
 	}{
 		"selftest.sh": {"selftest.sh", 0o755},
 		"SKILL.md":    {"SKILL.md", 0o644},
+		"README.md":   {"README.md", 0o644},
 	}
 	if src := SourceFile(m); src != "" {
 		// Compiled/wrapped: source is separate; `smith register` produces the
