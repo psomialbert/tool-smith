@@ -47,6 +47,24 @@ Until a tool is adopted, it only ever runs sandboxed (during its self-test).
 You may propose adoption by making the commit; do not merge it yourself or ask
 the reviewer to rubber-stamp it.
 
+## Your tool's SKILL.md describes the TOOL, not smith
+
+A tool's `SKILL.md` says **what the tool does, its contract, and when to reach
+for it** — and nothing about how smith works. Do **not** write about adoption,
+trust, tiers, sandboxing, PATH, or `smith` subcommands in a tool's `SKILL.md`.
+Reasons this matters:
+
+- That mechanism is smith's concern and it **changes between versions**. Baked
+  into a tool skill it goes stale, and it's duplicated into every project that
+  vendors the tool — impossible to fix centrally.
+- By the time an agent reads the skill, `smith install` has already put the tool
+  on PATH — so any "you may be sandboxed / check the tier" note is never true.
+- A tool asserting its own trust status is meaningless anyway.
+
+Only smith itself (its `--help`/README) and this cli-creator skill describe how
+smith works. Keep the tool skill to: sharpened trigger (frontmatter
+`description`), what it does, when to use it, the `--json` contract, and usage.
+
 ## The agent-friendly contract (templates enforce the shape, you keep it)
 
 - `--json` is the machine path: structured JSON/NDJSON on stdout, never prose.
