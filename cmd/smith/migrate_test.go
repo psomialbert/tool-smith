@@ -24,10 +24,45 @@ func TestHealStaleActivation(t *testing.T) {
 		t.Fatalf("stale line not rewritten: %q", got[2])
 	}
 
-	// A user's own _.path (no .toolsmith signature) is left untouched.
+	// A smith-managed file carrying ANOTHER machine's absolute .smith/bin path
+	// (e.g. a committed mise.local.toml) is also healed — it's still ours.
+	foreign := []string{
+		"# managed by smith: puts adopted tools on PATH",
+		"[env]",
+		`_.path = ["/Users/someone-else/proj/.smith/bin"]`,
+	}
+	got, ok = healStaleActivation(append([]string{}, foreign...), newLine)
+	if !ok || got[2] != newLine {
+		t.Fatalf("expected a committed foreign smith path to be healed, got ok=%v line=%q", ok, got[2])
+	}
+
+	// A user's own _.path (no smith header) is left untouched.
 	userOwned := []string{"[env]", `_.path = ["/opt/tools/bin"]`}
 	if _, ok := healStaleActivation(append([]string{}, userOwned...), newLine); ok {
 		t.Fatal("must not rewrite a user-authored _.path")
+	}
+}
+
+func TestEnsureProjectGitignoreIgnoresMiseLocal(t *testing.T) {
+	dir := t.TempDir()
+	restore, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(restore)
+
+	ensureProjectGitignore()
+	raw, err := os.ReadFile(".gitignore")
+	if err != nil {
+		t.Fatalf("no .gitignore written: %v", err)
+	}
+	for _, want := range []string{"mise.local.toml", smithDir + "/bin/", smithDir + "/cache/"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf(".gitignore missing %q:\n%s", want, raw)
+		}
 	}
 }
 
@@ -57,6 +92,26 @@ func TestEnsureActivationHealsStaleFile(t *testing.T) {
 	// Second call is a clean no-op (path already correct).
 	if err := ensureActivation(proj, binDir); err != nil {
 		t.Fatalf("re-run should be a no-op, got: %v", err)
+	}
+}
+
+func TestEnsureActivationHealsCommittedForeignPath(t *testing.T) {
+	// The peer scenario: someone committed mise.local.toml with their own
+	// absolute .smith/bin. A teammate's `smith install` must heal it, not error.
+	proj := t.TempDir()
+	mise := filepath.Join(proj, "mise.local.toml")
+	if err := os.WriteFile(mise, []byte(
+		"# managed by smith: puts adopted tools on PATH\n"+
+			"[env]\n_.path = [\"/Users/author/repo/.smith/bin\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(proj, ".smith", "bin")
+	if err := ensureActivation(proj, binDir); err != nil {
+		t.Fatalf("should heal a committed foreign path, got: %v", err)
+	}
+	raw, _ := os.ReadFile(mise)
+	if !strings.Contains(string(raw), binDir) || strings.Contains(string(raw), "/Users/author/") {
+		t.Fatalf("foreign path not healed to local binDir:\n%s", raw)
 	}
 }
 

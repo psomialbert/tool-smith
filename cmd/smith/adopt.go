@@ -523,10 +523,12 @@ func ensureProjectGitignore() {
 		}
 		return false
 	}
-	// .smith/bin (symlinks + built binaries) and .smith/cache (warmed uv
-	// caches) are generated per machine; the vendored source + lockfile are
-	// what's committed.
-	for _, want := range []string{smithDir + "/bin/", smithDir + "/cache/"} {
+	// .smith/bin (symlinks + built binaries), .smith/cache (warmed uv caches),
+	// and mise.local.toml (activation with a machine-absolute path) are all
+	// generated per machine by `smith install`; the vendored source + the pin
+	// are what's committed. Committing mise.local.toml would ship one machine's
+	// absolute path and break `smith install` for peers.
+	for _, want := range []string{smithDir + "/bin/", smithDir + "/cache/", "mise.local.toml"} {
 		if !has(want) {
 			if content != "" && !strings.HasSuffix(content, "\n") {
 				content += "\n"
