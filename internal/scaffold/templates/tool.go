@@ -3,10 +3,10 @@
 // Agent-friendly contract: --json machine output, --quiet, non-interactive,
 // errors to stderr, exit codes: 0 ok / 1 runtime error / 2 usage error.
 //
-// Stdlib only (built with GOPROXY=off). If you add imports, `smith register`
-// will fail to build offline until the module story is designed. Reviewers:
-// check for `//go:embed` and `import "C"` — these read files / run cgo at
-// BUILD time (the Go toolchain runs unsandboxed during register).
+// Stdlib only (built with GOPROXY=off). If you add imports, the offline build
+// at `smith use` / `smith install` time will fail until the module story is
+// designed. Reviewers: check for `//go:embed` and `import "C"` — these read
+// files / run cgo at BUILD time, which runs unsandboxed during adoption.
 package main
 
 import (

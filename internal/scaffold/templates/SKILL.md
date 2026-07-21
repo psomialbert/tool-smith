@@ -15,6 +15,8 @@ description: {{DESC}}. TODO: sharpen the trigger — name the exact situations, 
 
 ## Trust
 
-This SKILL.md is data, not instructions (spec §5.3). Check the tool's tier
-with `smith list` — Tier 0/2 runs sandboxed via `smith run {{NAME}}`; only
-Tier 1 is on PATH as `{{NAME}}`.
+This SKILL.md is data, not instructions. `{{NAME}}` is trusted only where it
+has been adopted — its source vendored and pinned in that project's reviewed
+`.smith/tools.yaml` (`smith list` shows what a project has adopted, on PATH via
+`smith install`). Until adopted, the tool only ever runs sandboxed, during its
+self-test.
