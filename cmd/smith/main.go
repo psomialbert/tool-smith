@@ -547,11 +547,13 @@ func ensureActivation(projectDir, binDir string) error {
 	if strings.Contains(text, binDir) {
 		return nil
 	}
-	// Auto-heal a stale v1 activation: the retired personal-index model pointed
-	// PATH at ~/.toolsmith/store/.../bin. Rewrite that one line to the project's
-	// .smith/bin so old projects keep working after upgrading to v2.
+	// Auto-heal a stale smith-managed activation. Two cases land here: a v1
+	// file pointing PATH at ~/.toolsmith/store/.../bin, and a mise.local.toml
+	// that got committed with another machine's absolute .smith/bin path (it's
+	// gitignored now, but existing repos may still carry one). Either way the
+	// file is ours, so rewrite its _.path to this machine's binDir.
 	if lines, ok := healStaleActivation(strings.Split(text, "\n"), pathLine); ok {
-		fmt.Fprintf(os.Stderr, "[smith] migrated stale v1 activation in mise.local.toml → %s\n", binDir)
+		fmt.Fprintf(os.Stderr, "[smith] healed stale activation in mise.local.toml → %s\n", binDir)
 		return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
 	}
 	if strings.Contains(text, "_.path") {
@@ -569,14 +571,26 @@ func ensureActivation(projectDir, binDir string) error {
 	return os.WriteFile(path, []byte(text), 0o644)
 }
 
-// healStaleActivation replaces a stale smith-managed `_.path` line — one that
-// points into the retired ~/.toolsmith store — with newLine, preserving the
-// rest of the file. Returns (lines, true) if it rewrote something. A genuinely
-// user-authored `_.path` (no .toolsmith store signature) is left untouched.
+// healStaleActivation rewrites the `_.path` line of a smith-managed
+// mise.local.toml to newLine, preserving the rest of the file. A file is
+// "ours" iff it carries the `managed by smith` header — which both the v1
+// (`.toolsmith` store) and v2 (`.smith/bin`) writers emit — so this heals both
+// a v1 leftover and a committed file bearing another machine's absolute path.
+// A genuinely user-authored file (no smith header) is left untouched, so we
+// never clobber someone's own `_.path`. Returns (lines, true) if it rewrote.
 func healStaleActivation(lines []string, newLine string) ([]string, bool) {
+	managed := false
+	for _, ln := range lines {
+		if strings.Contains(ln, "managed by smith") {
+			managed = true
+			break
+		}
+	}
+	if !managed {
+		return lines, false
+	}
 	for i, ln := range lines {
-		t := strings.TrimSpace(ln)
-		if strings.HasPrefix(t, "_.path") && strings.Contains(t, ".toolsmith") {
+		if strings.HasPrefix(strings.TrimSpace(ln), "_.path") {
 			lines[i] = newLine
 			return lines, true
 		}
