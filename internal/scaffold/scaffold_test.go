@@ -1,11 +1,43 @@
 package scaffold
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestTemplatesHaveNoRetiredV1Verbs guards against the scaffold drifting back
+// to the retired personal-index model. Every file a `smith new` stamps out
+// must describe the v2 flow (new → use → install), never register/run/promote,
+// Tier 0/1, or quarantine. This drift shipped once and misled an agent into
+// building a tool the v1 way — keep the templates honest.
+func TestTemplatesHaveNoRetiredV1Verbs(t *testing.T) {
+	retired := []string{
+		"smith register", "smith run ", "smith promote",
+		"Tier 0", "Tier 1", "Tier 2", "quarantine", "registration",
+	}
+	err := fs.WalkDir(templates, "templates", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		raw, err := templates.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		body := string(raw)
+		for _, term := range retired {
+			if strings.Contains(body, term) {
+				t.Errorf("%s contains retired v1 term %q", path, term)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCreateScaffoldsBundleWithReadme(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "greet")

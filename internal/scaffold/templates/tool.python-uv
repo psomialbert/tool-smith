@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#   # Declare third-party deps here, pinned. `smith register` locks them with
+#   # Declare third-party deps here, pinned. `smith use` locks them with
 #   # hashes (uv lock) and warms a tool-local cache so runs are offline.
 #   # Example: "six==1.16.0"
 # ]
