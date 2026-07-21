@@ -59,6 +59,8 @@ func main() {
 		err = cmdList(paths, args)
 	case "allowlist":
 		err = cmdAllowlist(paths, args)
+	case "migrate":
+		err = cmdMigrate(paths, args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -91,6 +93,8 @@ Usage:
   smith install                  realize .smith/tools.yaml onto the project PATH
   smith list                     list tools adopted in this project
   smith allowlist                show the org adoption policy (if any)
+  smith migrate                  clean up retired v1 files in SMITH_HOME
+                                 (backs them up first; safe to re-run)
   smith version                  print version
 
 Trust is per-project: a tool vendored + pinned in the reviewed .smith/tools.yaml
@@ -543,6 +547,13 @@ func ensureActivation(projectDir, binDir string) error {
 	if strings.Contains(text, binDir) {
 		return nil
 	}
+	// Auto-heal a stale v1 activation: the retired personal-index model pointed
+	// PATH at ~/.toolsmith/store/.../bin. Rewrite that one line to the project's
+	// .smith/bin so old projects keep working after upgrading to v2.
+	if lines, ok := healStaleActivation(strings.Split(text, "\n"), pathLine); ok {
+		fmt.Fprintf(os.Stderr, "[smith] migrated stale v1 activation in mise.local.toml → %s\n", binDir)
+		return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+	}
 	if strings.Contains(text, "_.path") {
 		return fmt.Errorf("mise.local.toml already sets env._.path; add %q to it manually", binDir)
 	}
@@ -556,6 +567,21 @@ func ensureActivation(projectDir, binDir string) error {
 		text += "\n[env]\n" + pathLine + "\n"
 	}
 	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+// healStaleActivation replaces a stale smith-managed `_.path` line — one that
+// points into the retired ~/.toolsmith store — with newLine, preserving the
+// rest of the file. Returns (lines, true) if it rewrote something. A genuinely
+// user-authored `_.path` (no .toolsmith store signature) is left untouched.
+func healStaleActivation(lines []string, newLine string) ([]string, bool) {
+	for i, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "_.path") && strings.Contains(t, ".toolsmith") {
+			lines[i] = newLine
+			return lines, true
+		}
+	}
+	return lines, false
 }
 
 // runSelfTest executes <dir>/selftest.sh <entry> sandboxed, from a scratch

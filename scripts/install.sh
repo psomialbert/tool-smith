@@ -69,10 +69,14 @@ chmod +x "$dest"
 echo "installed: $dest ($("$dest" version 2>/dev/null || echo '?'))"
 [ -f "$skill_dst" ] && echo "installed skill: $skill_dst"
 
+# Migrate a machine coming from the retired v1 (personal-index) layout: back up
+# ~/.toolsmith cruft and strip dead config keys. No-op on a clean/first install.
+"$dest" migrate || true
+
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) echo "note: $INSTALL_DIR is not on your PATH — add: export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 command -v mise >/dev/null 2>&1 || \
   echo "note: mise not found — smith needs it to run (https://mise.jdx.dev)"
-echo "next: run \`smith init\` in a project; see the README 'Using smith with agents' for the agent workflow + trust rules."
+echo "next: run \`smith use <repo>\` in a project to adopt a tool; see the README 'Using smith with agents' for the agent workflow + trust rules."
