@@ -32,7 +32,8 @@ gate**, exactly like reviewing any dependency.
   tools are only ever trusted through the adoption PR.
 - **Integrity.** `smith install` re-hashes each vendored bundle against its
   pin and refuses on mismatch (go.sum-style). A teammate who clones the
-  project and runs `smith install` gets the exact same tools.
+  project and runs `smith install` gets the exact same tools. `smith verify
+  --frozen` runs that check standalone as a CI gate (exit non-zero on drift).
 
 See [SECURITY.md](SECURITY.md) for the full threat model — what smith defends,
 what it doesn't, and how to report a vulnerability.
