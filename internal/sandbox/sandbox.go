@@ -5,19 +5,30 @@
 package sandbox
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
 // Perms are the per-tool sandbox grants. The zero value is the strict
-// default: no network, writes confined to CWD+TMP. A grant is declared in
-// the tool's manifest and is part of what a human reviews at promotion.
+// default: no network, writes confined to CWD+TMP. Grants are declared in the
+// tool's manifest and are part of what a human reviews at adoption.
 type Perms struct {
-	Network bool // allow network egress (default: denied)
+	Network    bool     // allow network egress (default: denied)
+	WritePaths []string // absolute paths granted write access beyond CWD+TMP
+}
+
+// sortedWritePaths returns WritePaths sorted, for a deterministic profile.
+func (p Perms) sortedWritePaths() []string {
+	w := append([]string(nil), p.WritePaths...)
+	sort.Strings(w)
+	return w
 }
 
 // seatbeltProfile builds the macOS Seatbelt policy. Deny-by-default for the
@@ -32,6 +43,9 @@ func seatbeltProfile(p Perms) string {
 	b.WriteString("(deny file-write*)\n")
 	b.WriteString(`(allow file-write* (subpath (param "CWD")))` + "\n")
 	b.WriteString(`(allow file-write* (subpath (param "TMP")))` + "\n")
+	for _, w := range p.sortedWritePaths() {
+		fmt.Fprintf(&b, "(allow file-write* (subpath %q))\n", w)
+	}
 	b.WriteString(`(allow file-write-data
   (literal "/dev/null")
   (literal "/dev/zero")
@@ -42,12 +56,18 @@ func seatbeltProfile(p Perms) string {
 }
 
 // profileName is stable per permission set so profiles are written once and
-// reused (no per-run temp files that would leak across syscall.Exec).
+// reused (no per-run temp files that would leak across syscall.Exec). The
+// common strict/network cases keep readable names; any write-path grant hashes
+// the profile so distinct capability sets never collide on one cached file.
 func profileName(p Perms) string {
-	if p.Network {
-		return "net.sb"
+	if len(p.WritePaths) == 0 {
+		if p.Network {
+			return "net.sb"
+		}
+		return "default.sb"
 	}
-	return "default.sb"
+	h := sha256.Sum256([]byte(seatbeltProfile(p)))
+	return "p-" + hex.EncodeToString(h[:])[:12] + ".sb"
 }
 
 func ensureProfile(profilesDir string, p Perms) (string, error) {
@@ -192,6 +212,9 @@ func Command(profilesDir, workDir string, perms Perms, argv []string) ([]string,
 			"--dir", linuxScratchHome,
 			"--bind", cwd, cwd,
 			"--die-with-parent",
+		}
+		for _, w := range perms.sortedWritePaths() {
+			out = append(out, "--bind", w, w) // rw bind for a granted write path
 		}
 		if !perms.Network {
 			out = append(out, "--unshare-net")

@@ -7,6 +7,43 @@ import (
 	"testing"
 )
 
+func TestSeatbeltProfileWriteGrant(t *testing.T) {
+	prof := seatbeltProfile(Perms{WritePaths: []string{"/opt/cache", "/var/data"}})
+	for _, want := range []string{
+		`(allow file-write* (subpath "/opt/cache"))`,
+		`(allow file-write* (subpath "/var/data"))`,
+	} {
+		if !strings.Contains(prof, want) {
+			t.Fatalf("profile missing write grant %q:\n%s", want, prof)
+		}
+	}
+	// Strict profile grants no extra paths.
+	if strings.Contains(seatbeltProfile(Perms{}), "/opt/cache") {
+		t.Fatal("strict profile must not grant extra write paths")
+	}
+}
+
+func TestProfileNameDistinctPerPerms(t *testing.T) {
+	if profileName(Perms{}) != "default.sb" {
+		t.Fatal("strict → default.sb")
+	}
+	if profileName(Perms{Network: true}) != "net.sb" {
+		t.Fatal("network → net.sb")
+	}
+	a := profileName(Perms{WritePaths: []string{"/a"}})
+	b := profileName(Perms{WritePaths: []string{"/b"}})
+	if a == b {
+		t.Fatalf("distinct write-path perms must get distinct profile names (%s == %s)", a, b)
+	}
+	if !strings.HasPrefix(a, "p-") {
+		t.Fatalf("write-path profile should be hash-named, got %q", a)
+	}
+	// Order-independent (sorted): same set → same name.
+	if profileName(Perms{WritePaths: []string{"/a", "/b"}}) != profileName(Perms{WritePaths: []string{"/b", "/a"}}) {
+		t.Fatal("profileName must be order-independent")
+	}
+}
+
 func TestFunctionalProbe(t *testing.T) {
 	err := Functional(filepath.Join(t.TempDir(), "profiles"))
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {

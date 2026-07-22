@@ -296,6 +296,44 @@ then run `+"`smith install`"+` to put it on PATH for this project.
 // adoptResult is what adoptAtVersion pinned.
 type adoptResult struct{ Name, Version, Sha256, Dst string }
 
+// manifestPerms maps a tool's declared sandbox capabilities (manifest
+// `sandbox:`) to runtime Perms, expanding a leading ~ to $HOME and making write
+// paths absolute. nil manifest.Sandbox = the strict default.
+func manifestPerms(m scaffold.Manifest) sandbox.Perms {
+	var perms sandbox.Perms
+	if m.Sandbox == nil {
+		return perms
+	}
+	perms.Network = m.Sandbox.Network
+	home, _ := os.UserHomeDir()
+	for _, w := range m.Sandbox.Write {
+		w = strings.TrimSpace(w)
+		if w == "" {
+			continue
+		}
+		if strings.HasPrefix(w, "~/") && home != "" {
+			w = filepath.Join(home, w[2:])
+		}
+		if abs, err := filepath.Abs(w); err == nil {
+			w = abs
+		}
+		perms.WritePaths = append(perms.WritePaths, w)
+	}
+	return perms
+}
+
+// capabilitySummary renders granted capabilities for surfacing; "" if none.
+func capabilitySummary(perms sandbox.Perms) string {
+	var parts []string
+	if perms.Network {
+		parts = append(parts, "network egress")
+	}
+	if len(perms.WritePaths) > 0 {
+		parts = append(parts, "write: "+strings.Join(perms.WritePaths, ", "))
+	}
+	return strings.Join(parts, "; ")
+}
+
 // adoptAtVersion clones clonedURL, checks out version ("" = the repo's
 // describe), loads the manifest, materializes + self-tests sandboxed, vendors
 // the reviewable source into .smith/tools/<name>/, and updates+saves the pin.
@@ -365,9 +403,16 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (a
 	}
 
 	// Sandboxed self-test before vendoring: unreviewed code stays contained
-	// at adopt time; a failing self-test blocks adoption.
+	// at adopt time; a failing self-test blocks adoption. The tool's declared
+	// capabilities (manifest `sandbox:`) are surfaced for the reviewer and are
+	// the grants the self-test runs with — everything else stays denied.
+	perms := manifestPerms(m)
+	if summary := capabilitySummary(perms); summary != "" {
+		fmt.Fprintf(os.Stderr, "[smith] ⚠ %s@%s requests capabilities: %s\n", m.Name, version, summary)
+		fmt.Fprintln(os.Stderr, "[smith]   these are granted during the self-test — scrutinize them when you review the adoption")
+	}
 	fmt.Fprintf(os.Stderr, "[smith] self-testing %s@%s (sandboxed) before adopting...\n", m.Name, version)
-	if err := runSelfTest(p, clone, entry); err != nil {
+	if err := runSelfTest(p, clone, entry, perms); err != nil {
 		return adoptResult{}, fmt.Errorf("self-test FAILED — not adopted: %w", err)
 	}
 

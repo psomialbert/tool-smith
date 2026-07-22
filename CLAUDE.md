@@ -41,6 +41,17 @@ sync silently. **Before committing, verify each still matches actual behavior:**
 - **Change the adopt pipeline** (clone → checkout → self-test → vendor → pin) →
   it's `adoptAtVersion` in `cmd/smith/adopt.go`, shared by `smith use` and
   `smith upgrade`. Change it once there; don't fork the logic into either caller.
+- **Add a sandbox capability** (a new `sandbox:` manifest grant) → extend
+  `scaffold.SandboxSpec` + `sandbox.Perms`, enforce it in BOTH `seatbeltProfile`
+  and the bwrap args in `sandbox.Command` (and include it in `profileName`'s
+  hash), map it in `manifestPerms`, surface it in `capabilitySummary`, and
+  document it (SECURITY.md, README, cli-creator). Perms must stay enforced at
+  the self-test, not just declared.
+- **Add a health check** → add it to the `doctorChecks()` registry in
+  `cmd/smith/doctor.go` as a diagnose/apply pair. Reuse the shared halves
+  (`activationState`, `gitignoreMissing`, `materializeTool`, `diagnoseV1Home`,
+  `bundleHash`, `sandbox.Functional`) — don't duplicate detection. `--fix` runs
+  only fixable (safe/reversible) checks and never runs git.
 
 ## Human-owned commands
 
@@ -48,11 +59,6 @@ sync silently. **Before committing, verify each still matches actual behavior:**
 they're **human-owned** (agents author + propose; humans publish + adopt).
 `publish` requires an explicit `--public`/`--private` and never runs itself as a
 side effect of another command.
-- **Add a health check** → add it to the `doctorChecks()` registry in
-  `cmd/smith/doctor.go` as a diagnose/apply pair. Reuse the shared halves
-  (`activationState`, `gitignoreMissing`, `materializeTool`, `diagnoseV1Home`,
-  `bundleHash`, `sandbox.Functional`) — don't duplicate detection. `--fix` runs
-  only fixable (safe/reversible) checks and never runs git.
 
 ## smith doctor
 
