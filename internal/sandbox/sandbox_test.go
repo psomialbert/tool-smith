@@ -1,10 +1,25 @@
 package sandbox
 
 import (
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestFunctionalProbe(t *testing.T) {
+	err := Functional(filepath.Join(t.TempDir(), "profiles"))
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		if err == nil {
+			t.Fatal("expected error on unsupported platform")
+		}
+		return
+	}
+	// darwin/linux: either it works, or it fails closed with a non-empty message.
+	if err != nil && err.Error() == "" {
+		t.Fatal("Functional returned a non-nil but empty error")
+	}
+}
 
 func TestSeatbeltProfileNetworkGrant(t *testing.T) {
 	strict := seatbeltProfile(Perms{})

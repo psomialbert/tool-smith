@@ -169,6 +169,22 @@ sandboxed self-test, and updates the pin in `.smith/tools.yaml`. The version
 bump is a reviewable diff like the original adoption; `smith install` picks it
 up.
 
+## Health checks (smith doctor)
+
+Diagnose project + machine health:
+
+```sh
+smith doctor            # report only (safe, CI-friendly; exits non-zero on errors)
+smith doctor --fix      # apply safe, reversible repairs
+smith doctor --json     # machine-readable
+```
+
+Checks: mise present, sandbox functional, retired v1 files (fixable); and, in a
+project, activation, `.gitignore` coverage, a git-tracked `mise.local.toml`,
+vendored-source drift, pinned-but-not-installed tools, and un-sharpened tool
+SKILL triggers. `--fix` repairs activation, `.gitignore`, install, and v1 cruft;
+it never runs git and never re-fetches over the network.
+
 ## Build & test
 
 ```sh

@@ -46,52 +46,68 @@ func cmdMigrate(p config.Paths, args []string) error {
 		}
 	}
 
-	var present []string
+	present, staleKeys := diagnoseV1Home(p)
+	if len(present) == 0 && len(staleKeys) == 0 {
+		say("smith: already on the v2 layout; nothing to migrate")
+		return nil
+	}
+	moved, dropped, backup, err := applyV1Migrate(p)
+	if err != nil {
+		return err
+	}
+	for _, name := range moved {
+		say("  moved v1 %s → %s", name, backup)
+	}
+	if len(moved) > 0 {
+		say("smith: backed up %d retired item(s) to %s (safe to delete once you're happy)", len(moved), backup)
+	}
+	if len(dropped) > 0 {
+		say("  stripped retired config key(s): %s", strings.Join(dropped, ", "))
+	}
+	return nil
+}
+
+// diagnoseV1Home reports retired v1 artifacts present in SMITH_HOME and dead
+// config keys, without mutating anything (used by `smith doctor`).
+func diagnoseV1Home(p config.Paths) (present []string, staleKeys []string) {
 	for _, name := range v1HomeArtifacts {
 		if _, err := os.Lstat(filepath.Join(p.Home, name)); err == nil {
 			present = append(present, name)
 		}
 	}
-	droppedKeys, cfgErr := staleConfigKeys(filepath.Join(p.Home, "config.yaml"))
-	if cfgErr != nil {
-		return cfgErr
-	}
+	staleKeys, _ = configStaleKeyNames(filepath.Join(p.Home, "config.yaml"))
+	return present, staleKeys
+}
 
-	if len(present) == 0 && len(droppedKeys) == 0 {
-		say("smith: already on the v2 layout; nothing to migrate")
-		return nil
-	}
-
+// applyV1Migrate backs up retired dirs to a timestamped dir and strips dead
+// config keys, returning what it did. A fixed (per-day) backup name keeps it
+// deterministic and re-runnable.
+func applyV1Migrate(p config.Paths) (moved []string, dropped []string, backup string, err error) {
+	present, _ := diagnoseV1Home(p)
 	if len(present) > 0 {
-		// A fixed backup name keeps migrate deterministic and re-runnable; the
-		// day is enough to distinguish accidental double-runs from real history.
-		backup := filepath.Join(p.Home, ".v1-backup-"+time.Now().Format("20060102"))
-		if err := os.MkdirAll(backup, 0o755); err != nil {
-			return err
+		backup = filepath.Join(p.Home, ".v1-backup-"+time.Now().Format("20060102"))
+		if err = os.MkdirAll(backup, 0o755); err != nil {
+			return
 		}
 		for _, name := range present {
 			dst := filepath.Join(backup, name)
-			if err := os.RemoveAll(dst); err != nil { // idempotent re-run
-				return err
+			if err = os.RemoveAll(dst); err != nil { // idempotent re-run
+				return
 			}
-			if err := os.Rename(filepath.Join(p.Home, name), dst); err != nil {
-				return fmt.Errorf("backing up %s: %w", name, err)
+			if err = os.Rename(filepath.Join(p.Home, name), dst); err != nil {
+				err = fmt.Errorf("backing up %s: %w", name, err)
+				return
 			}
-			say("  moved v1 %s → %s", name, backup)
+			moved = append(moved, name)
 		}
-		say("smith: backed up %d retired item(s) to %s (safe to delete once you're happy)", len(present), backup)
 	}
-	if len(droppedKeys) > 0 {
-		say("  stripped retired config key(s): %s", strings.Join(droppedKeys, ", "))
-	}
-	return nil
+	dropped, err = staleConfigKeys(filepath.Join(p.Home, "config.yaml"))
+	return
 }
 
-// staleConfigKeys removes retired top-level keys from config.yaml, rewriting it
-// in place, and returns the names it dropped. Missing/empty config → no-op.
-// Comments are not preserved (yaml round-trip), which is acceptable for a
-// one-time migration of a small settings file.
-func staleConfigKeys(path string) ([]string, error) {
+// configStaleKeyNames returns retired top-level config.yaml keys without
+// writing. Missing/empty/unparseable config → no keys.
+func configStaleKeyNames(path string) ([]string, error) {
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -101,20 +117,37 @@ func staleConfigKeys(path string) ([]string, error) {
 	}
 	var m map[string]yaml.Node
 	if err := yaml.Unmarshal(raw, &m); err != nil {
-		// Unparseable config: leave it alone rather than clobber it.
-		return nil, nil
+		return nil, nil // unparseable: leave it alone
 	}
 	var dropped []string
 	for k := range m {
 		if !v2ConfigKeys[k] {
 			dropped = append(dropped, k)
-			delete(m, k)
 		}
 	}
-	if len(dropped) == 0 {
+	sort.Strings(dropped)
+	return dropped, nil
+}
+
+// staleConfigKeys removes retired top-level keys from config.yaml, rewriting it
+// in place, and returns the names it dropped. Comments are not preserved (yaml
+// round-trip), acceptable for a one-time migration of a small settings file.
+func staleConfigKeys(path string) ([]string, error) {
+	dropped, err := configStaleKeyNames(path)
+	if err != nil || len(dropped) == 0 {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]yaml.Node
+	if err := yaml.Unmarshal(raw, &m); err != nil {
 		return nil, nil
 	}
-	sort.Strings(dropped)
+	for _, k := range dropped {
+		delete(m, k)
+	}
 	out, err := yaml.Marshal(m)
 	if err != nil {
 		return nil, err

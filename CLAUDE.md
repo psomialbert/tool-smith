@@ -38,6 +38,19 @@ sync silently. **Before committing, verify each still matches actual behavior:**
   Runtimes section.
 - **Change the adoption/trust flow** → cli-creator skill, README, and the tool
   template README all describe it; update together.
+- **Add a health check** → add it to the `doctorChecks()` registry in
+  `cmd/smith/doctor.go` as a diagnose/apply pair. Reuse the shared halves
+  (`activationState`, `gitignoreMissing`, `materializeTool`, `diagnoseV1Home`,
+  `bundleHash`, `sandbox.Functional`) — don't duplicate detection. `--fix` runs
+  only fixable (safe/reversible) checks and never runs git.
+
+## smith doctor
+
+The proactive health command: `smith doctor` reports machine + project issues,
+`--fix` repairs the safe/reversible ones. It consolidates logic that used to
+fire only reactively (during install/use/migrate). When you add repair/verify
+behavior anywhere, expose it as a doctor check too, so it's discoverable without
+tripping over it.
 
 ## Releasing (this bit us — read it)
 
@@ -59,4 +72,5 @@ agent-loaded.
   merge). Direct pushes of tags are fine.
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 - Go is pinned via `mise.toml`; run Go through `mise exec -- go` (or `make`).
-- Run `make test` + `mise exec -- go vet ./...` before pushing.
+- Run `make test` + `mise exec -- go vet ./...` + `mise exec -- gofmt -l .`
+  before pushing (CI has a format check; `gofmt -l .` must print nothing).
