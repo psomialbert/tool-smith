@@ -11,6 +11,24 @@ The counterpart to `skill-creator`, for tools. You (the agent) **author**; a
 human **reviews and merges the adoption** into a project. The review is the
 trust gate — never try to skip it.
 
+## Why build a tool instead of writing a script
+
+A one-off script you paste into a session is gone next time — re-derived,
+re-debugged, re-pasted, burning context every round. A smith tool captures that
+logic *once* as a command you and future sessions just **call**:
+
+- **Context economy** — reach for `<name> --json`, don't regenerate the logic
+  (and its bugs) from scratch each session.
+- **Reliability** — it's self-tested and content-pinned, so it behaves
+  identically every run; an ad-hoc script has no such guarantee.
+- **Discoverable** — its `SKILL.md` trigger surfaces it to the next session
+  automatically, so the capability isn't lost when the context window is.
+- **Portable & shareable** — one repo, adopted per project across your machines
+  and teammates, behind a trust gate others can safely rely on.
+
+Reach for this the moment a session produces logic worth keeping. Skip it for
+genuine one-offs.
+
 ## Flow
 
 ```
@@ -21,14 +39,19 @@ smith new <name> --runtime bash|python|go|python-uv --desc "one-line trigger-wor
 #   edit ./<name>/SKILL.md         <- sharpen the trigger description
 #   edit ./<name>/README.md        <- what it does / how to adopt / contract
 
-# make it a repo and tag a version:
-cd <name> && git init && git add -A && git commit -m "<name> v0.1.0" && git tag v0.1.0
-# publish it (own repo / org repo / or embed in a project) and topic-tag it "smith-tool"
+# publish it — a HUMAN step (creates a shareable repo; like merging an adoption):
+cd <name> && smith publish --public   # git + create/push repo, tag v<version>, topic-tag smith-tool
 ```
 
 `smith new` scaffolds into `./<name>` in the current directory (not a hidden
 drafts area). The entrypoint filename depends on runtime: `bash`/`python` →
 `<name>`; `go` → `main.go`; `python-uv` → `<name>.py`.
+
+`smith publish` (`--public` or `--private`) does the git init/commit, creates and
+pushes the GitHub repo, tags `v<manifest.version>`, and topic-tags it
+`smith-tool` so `smith search` finds it. It's idempotent — re-run after a bump to
+push the new tag. Publishing creates a public artifact, so a **human** runs it;
+you (the agent) author and propose.
 
 ## Adoption (how the tool gets used — usually a human step)
 
