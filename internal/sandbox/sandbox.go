@@ -69,6 +69,39 @@ func WriteDefaultProfile(profilesDir string) (string, error) {
 	return ensureProfile(profilesDir, Perms{})
 }
 
+// Functional reports whether a strict sandbox actually works on this host by
+// running a no-op command inside it. Presence of the sandbox binary is not
+// enough — some CI hosts ship bwrap but forbid the namespace setup it needs.
+// Returns nil on success, or a descriptive error (fails closed).
+func Functional(profilesDir string) error {
+	bin := map[string]string{"darwin": "sandbox-exec", "linux": "bwrap"}[runtime.GOOS]
+	if bin == "" {
+		return fmt.Errorf("no sandbox available on %s", runtime.GOOS)
+	}
+	if _, err := exec.LookPath(bin); err != nil {
+		return fmt.Errorf("%s not found on PATH", bin)
+	}
+	work, err := os.MkdirTemp("", "smith-probe-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work)
+	tru, err := exec.LookPath("true")
+	if err != nil {
+		tru = "/usr/bin/true"
+	}
+	argv, err := Command(filepath.Join(work, "profiles"), work, Perms{}, []string{tru})
+	if err != nil {
+		return fmt.Errorf("sandbox setup failed: %w", err)
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = work
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("sandbox present but not functional: %v: %s", err, out)
+	}
+	return nil
+}
+
 // envAllowlist is the only parent environment that reaches a sandboxed
 // tool. Everything else — tokens, cloud creds, session identifiers — stays
 // out: the sandbox blocks network, but env -> file-in-CWD -> later read is
