@@ -61,6 +61,8 @@ func main() {
 		err = cmdSearch(paths, args)
 	case "review":
 		err = cmdReview(paths, args)
+	case "verify":
+		err = cmdVerify(paths, args)
 	case "list", "status":
 		err = cmdList(paths, args)
 	case "allowlist":
@@ -105,6 +107,8 @@ Usage:
   smith upgrade [tool][@<ver>]   re-pin adopted tool(s) to a newer version (no
                                  arg = all → latest); self-tested, then install
   smith diff <tool>[@<ver>]      preview the source changes an upgrade would make
+  smith verify [--frozen] [--json]  re-hash vendored source vs pins (CI integrity
+                                 gate); --frozen also fails on un-pinned dirs
   smith list                     list tools adopted in this project
   smith allowlist                show the org adoption policy (if any)
   smith migrate                  clean up retired v1 files in SMITH_HOME
