@@ -51,6 +51,10 @@ func main() {
 		err = cmdUse(paths, args)
 	case "install":
 		err = cmdInstall(paths, args)
+	case "upgrade":
+		err = cmdUpgrade(paths, args)
+	case "diff":
+		err = cmdDiff(paths, args)
 	case "search":
 		err = cmdSearch(paths, args)
 	case "review":
@@ -93,6 +97,9 @@ Usage:
   smith review <repo|path|name> [--plain|--edit|--paths] [--editor <cmd>]
                                  read a tool's source (interactive TUI) before adopting
   smith install                  realize .smith/tools.yaml onto the project PATH
+  smith upgrade [tool][@<ver>]   re-pin adopted tool(s) to a newer version (no
+                                 arg = all → latest); self-tested, then install
+  smith diff <tool>[@<ver>]      preview the source changes an upgrade would make
   smith list                     list tools adopted in this project
   smith allowlist                show the org adoption policy (if any)
   smith migrate                  clean up retired v1 files in SMITH_HOME

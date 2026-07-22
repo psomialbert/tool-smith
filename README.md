@@ -164,10 +164,20 @@ control. (Signing the allowlist for tamper-evident distribution is future.)
 
 ## Updating an adopted tool
 
-Re-run `smith use <repo>@<newver>` — it re-vendors the source, re-runs the
-sandboxed self-test, and updates the pin in `.smith/tools.yaml`. The version
-bump is a reviewable diff like the original adoption; `smith install` picks it
-up.
+```sh
+smith diff <tool>           # preview: what would change vs the newest version
+smith upgrade <tool>        # re-pin one tool to the newest tag (self-tested)
+smith upgrade               # ...or every adopted tool → its newest tag
+smith upgrade <tool>@<ver>  # pin an exact version
+```
+
+`smith upgrade` discovers the newest semver tag of each tool's source repo,
+re-runs the sandboxed self-test, and re-pins in `.smith/tools.yaml` — a
+reviewable diff like the original adoption. It stops at re-pinning (run `smith
+install` after) so new source is reviewed before it lands on PATH; a failed
+self-test leaves the old pin untouched. `smith diff` previews the vendored-source
+changes first (`--stat` for a summary, `--json` for a machine-readable list).
+(Re-running `smith use <repo>@<newver>` by hand still works and is equivalent.)
 
 ## Health checks (smith doctor)
 
