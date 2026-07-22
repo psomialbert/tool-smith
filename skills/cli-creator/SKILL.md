@@ -98,8 +98,28 @@ smith works. Keep the tool skill to: sharpened trigger (frontmatter
 
 Semver in `manifest.yaml` (human intent) + a matching git tag (`v<x.y.z>`).
 The per-project pin in `.smith/tools.yaml` records a sha256 of the vendored
-source for reproducibility. Editing a released tool = commit + a new tag;
-adopters bump with `smith use <repo>@<newver>`.
+source for reproducibility.
+
+## Changing a tool (release checklist)
+
+Editing a released tool means shipping a new version. The trap: changing
+behavior but leaving the **trigger** stale, so agents no longer discover the
+new capability. A tool has exactly **one** description — the `SKILL.md`
+frontmatter `description` (the agent trigger). There is no manifest description
+to keep in sync. Run this checklist for every change:
+
+- [ ] **Update `SKILL.md` frontmatter `description`** if behavior/commands
+      changed — this is the discovery signal. If you added a command or mode,
+      the trigger must mention the new capability, or nobody will reach for it.
+- [ ] Update the `SKILL.md` body, `README.md`, and `--help` to match.
+- [ ] Update `selftest.sh` with assertions for the new/changed behavior.
+- [ ] Bump `version` in `manifest.yaml` (semver).
+- [ ] `git commit` + `git tag v<next>` + push (tag included).
+- [ ] Re-adopt in each project: `smith use <repo>@<newver>` then `smith install`
+      (a fresh reviewable commit). Vendored source is pinned by sha, so a project
+      keeps the old version until it re-adopts.
+
+## Trust reminders
 
 ## Trust reminders
 
