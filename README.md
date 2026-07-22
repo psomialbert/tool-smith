@@ -72,6 +72,7 @@ smith use ../greet@v0.1.0          # sandboxed self-test, vendor, pin
 smith review greet                 # read the source (TUI); comment lines -> agent report
 git add .smith && git commit       # the adoption, for your team to review
 smith install                      # realize it onto the project PATH
+smith list                         # what's adopted in this project (+ install status)
 greet alice                        # -> hello, alice
 
 # discover others
@@ -85,7 +86,7 @@ a **human reviews the PR and adopts**.
 
 | Agents may | Humans own |
 |---|---|
-| `new` (author), `use` (propose adoption), `review` (read), `search`, `list`, `install` | reviewing + **merging the adoption PR** (the trust decision) |
+| `new` (author), `use`/`upgrade` (propose adoption), `diff`/`review` (read), `search`, `list`, `doctor`, `install` | reviewing + **merging the adoption PR** (the trust decision) |
 
 `smith use` runs the tool's self-test sandboxed and writes a reviewable diff;
 it never grants trust on its own — the tool becomes PATH-available only once
@@ -132,7 +133,9 @@ Per **project**:
 ```
 .smith/tools.yaml          adopted tools: source, version, content hash, runtime  (committed)
 .smith/tools/<name>/        vendored tool source — reviewed in the PR             (committed)
-.smith/bin/                 symlink farm put on PATH via mise.local.toml          (git-ignored)
+.smith/bin/                 symlink farm / built binaries, put on PATH           (git-ignored)
+.smith/cache/               warmed python-uv caches                              (git-ignored)
+mise.local.toml            activation: puts .smith/bin on PATH (machine-specific) (git-ignored)
 ```
 
 `SMITH_HOME` (default `~/.toolsmith`) is small now — just generated sandbox
@@ -194,6 +197,11 @@ project, activation, `.gitignore` coverage, a git-tracked `mise.local.toml`,
 vendored-source drift, pinned-but-not-installed tools, and un-sharpened tool
 SKILL triggers. `--fix` repairs activation, `.gitignore`, install, and v1 cruft;
 it never runs git and never re-fetches over the network.
+
+`smith migrate` does the machine-level v1→v2 cleanup on its own — it backs up
+retired `~/.toolsmith` files and strips dead `config.yaml` keys (safe to re-run).
+The installer runs it automatically, and `smith doctor --fix` covers the same
+cleanup, so you rarely call it directly.
 
 ## Build & test
 
