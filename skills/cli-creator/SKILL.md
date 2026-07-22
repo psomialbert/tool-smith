@@ -11,6 +11,24 @@ The counterpart to `skill-creator`, for tools. You (the agent) **author**; a
 human **reviews and merges the adoption** into a project. The review is the
 trust gate — never try to skip it.
 
+## Why build a tool instead of writing a script
+
+A one-off script you paste into a session is gone next time — re-derived,
+re-debugged, re-pasted, burning context every round. A smith tool captures that
+logic *once* as a command you and future sessions just **call**:
+
+- **Context economy** — reach for `<name> --json`, don't regenerate the logic
+  (and its bugs) from scratch each session.
+- **Reliability** — it's self-tested and content-pinned, so it behaves
+  identically every run; an ad-hoc script has no such guarantee.
+- **Discoverable** — its `SKILL.md` trigger surfaces it to the next session
+  automatically, so the capability isn't lost when the context window is.
+- **Portable & shareable** — one repo, adopted per project across your machines
+  and teammates, behind a trust gate others can safely rely on.
+
+Reach for this the moment a session produces logic worth keeping. Skip it for
+genuine one-offs.
+
 ## Flow
 
 ```
