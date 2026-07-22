@@ -8,6 +8,38 @@ import (
 	"testing"
 )
 
+// TestManifestOmitsDescriptionSkillKeepsIt locks in the single-source-of-truth
+// for a tool's description: it lives in the SKILL.md frontmatter (the agent
+// trigger), NOT in manifest.yaml. Two descriptions drift — an agent updated the
+// (vestigial) manifest one and left the live SKILL trigger stale.
+func TestManifestOmitsDescriptionSkillKeepsIt(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "greet")
+	desc := "print a greeting to stdout"
+	if err := Create(dir, Manifest{
+		Name: "greet", Version: "0.1.0", Description: desc, Runtime: "bash",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(manifest), "description") || strings.Contains(string(manifest), desc) {
+		t.Fatalf("manifest.yaml must not carry a description (single source is SKILL.md):\n%s", manifest)
+	}
+	skill, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(skill), desc) {
+		t.Fatalf("SKILL.md must carry the description:\n%s", skill)
+	}
+	// LoadManifest still works without a serialized description.
+	if _, err := LoadManifest(dir); err != nil {
+		t.Fatalf("LoadManifest failed after dropping description: %v", err)
+	}
+}
+
 // TestTemplatesHaveNoRetiredV1Verbs guards against the scaffold drifting back
 // to the retired personal-index model. Every file a `smith new` stamps out
 // must describe the v2 flow (new → use → install), never register/run/promote,
