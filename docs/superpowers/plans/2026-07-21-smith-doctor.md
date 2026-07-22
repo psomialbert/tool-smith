@@ -1328,7 +1328,152 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 8: End-to-end integration test + docs
+### Task 8: skill-trigger check
+
+Flag a vendored tool whose `SKILL.md` frontmatter `description` (the agent
+trigger) is empty or still the scaffold placeholder. Report-only — writing a
+good trigger is human judgment.
+
+**Files:**
+- Modify: `cmd/smith/doctor.go` (add `skillTriggerIssue` + append check; import `gopkg.in/yaml.v3`)
+- Test: `cmd/smith/doctor_test.go`
+
+**Interfaces:**
+- Consumes: `sortedToolNames(l ProjLock) []string`, `ProjLock`, `smithDir`
+- Produces: `func skillTriggerIssue(skillPath string) (reason string, bad bool)`
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+// cmd/smith/doctor_test.go  (add)
+func TestSkillTriggerCheck(t *testing.T) {
+	dir := t.TempDir()
+	restore, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(restore)
+	tdir := filepath.Join(smithDir, "tools", "greet")
+	os.MkdirAll(tdir, 0o755)
+	lock := ProjLock{Tools: map[string]ProjTool{"greet": {Entrypoint: "greet", Runtime: "bash"}}}
+	dc := docCtx{projectDir: ".", lock: lock}
+
+	var c check
+	for _, k := range doctorChecks() {
+		if k.name == "skill-trigger" {
+			c = k
+		}
+	}
+	if c.name == "" {
+		t.Fatal("skill-trigger check not registered")
+	}
+
+	// Placeholder trigger → WARN.
+	os.WriteFile(filepath.Join(tdir, "SKILL.md"),
+		[]byte("---\nname: greet\ndescription: print a greeting. TODO: sharpen the trigger — name the situations\n---\n# greet\n"), 0o644)
+	if fs := c.diagnose(dc); fs[0].Severity != sevWARN {
+		t.Fatalf("placeholder → WARN, got %+v", fs[0])
+	}
+
+	// Sharpened trigger → OK.
+	os.WriteFile(filepath.Join(tdir, "SKILL.md"),
+		[]byte("---\nname: greet\ndescription: Print a greeting; use when a session needs a canned hello line.\n---\n# greet\n"), 0o644)
+	if fs := c.diagnose(dc); fs[0].Severity != sevOK {
+		t.Fatalf("sharpened → OK, got %+v", fs[0])
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `mise exec -- go test ./cmd/smith/ -run TestSkillTriggerCheck -v`
+Expected: FAIL — check not registered.
+
+- [ ] **Step 3: Write minimal implementation**
+
+Add `"gopkg.in/yaml.v3"` to `doctor.go` imports, then:
+
+```go
+// skillTriggerIssue reports whether a vendored SKILL.md has an unusable agent
+// trigger — a missing/empty frontmatter description, or the scaffold placeholder.
+// It cannot judge whether a trigger is *complete* (that a new command is
+// mentioned) — that's the cli-creator "Changing a tool" checklist's job.
+func skillTriggerIssue(skillPath string) (reason string, bad bool) {
+	raw, err := os.ReadFile(skillPath)
+	if err != nil {
+		return "SKILL.md missing", true
+	}
+	text := string(raw)
+	if !strings.HasPrefix(text, "---") {
+		return "SKILL.md has no frontmatter", true
+	}
+	rest := text[3:]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return "SKILL.md frontmatter not closed", true
+	}
+	var meta struct {
+		Description string `yaml:"description"`
+	}
+	if err := yaml.Unmarshal([]byte(rest[:end]), &meta); err != nil {
+		return "SKILL.md frontmatter unparseable", true
+	}
+	d := strings.TrimSpace(meta.Description)
+	if d == "" {
+		return "empty SKILL.md trigger", true
+	}
+	if strings.Contains(d, "TODO: sharpen the trigger") {
+		return "placeholder SKILL.md trigger — sharpen it", true
+	}
+	return "", false
+}
+```
+
+Append the check in `doctorChecks()`:
+
+```go
+		{
+			name: "skill-trigger", scope: scopeProject,
+			diagnose: func(dc docCtx) []finding {
+				names := sortedToolNames(dc.lock)
+				if len(names) == 0 {
+					return []finding{{Check: "skill-trigger", Scope: scopeProject, Severity: sevOK, Message: "no tools pinned"}}
+				}
+				var out []finding
+				for _, name := range names {
+					f := finding{Check: "skill-trigger", Scope: scopeProject}
+					path := filepath.Join(dc.projectDir, smithDir, "tools", name, "SKILL.md")
+					if reason, bad := skillTriggerIssue(path); bad {
+						f.Severity = sevWARN
+						f.Message = name + ": " + reason
+						f.FixHint = "sharpen the SKILL.md frontmatter description in the tool repo, release a new version, re-adopt"
+					} else {
+						f.Severity = sevOK
+						f.Message = name + ": trigger looks sharpened"
+					}
+					out = append(out, f)
+				}
+				return out
+			},
+			// no apply: writing a good trigger is human judgment
+		},
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `mise exec -- go test ./cmd/smith/ -run TestSkillTriggerCheck -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add cmd/smith/doctor.go cmd/smith/doctor_test.go
+git commit -m "doctor: skill-trigger check (empty/placeholder SKILL trigger)
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task 9: End-to-end integration test + docs
 
 **Files:**
 - Test: `cmd/smith/doctor_test.go` (integration)
@@ -1445,10 +1590,11 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Output + `--json` + exit codes → `renderDoctor` + `doctorExit`, Task 2. ✓
 - Check registry over diagnose/apply → Tasks 2-7. ✓
 - Machine checks (mise-present, sandbox-functional, v1-home-cruft) → Tasks 2, 3. ✓
-- Project checks (activation, gitignore, tracked-mise-local, vendored-sha, installed) → Tasks 4-7. ✓
+- Project checks (activation, gitignore, tracked-mise-local, vendored-sha, installed, skill-trigger) → Tasks 4-8. ✓
 - Git boundary (no git in `--fix`) → tracked-mise-local has no `apply`. ✓
 - Refactors share one source of truth → activationState, gitignoreMissing, diagnoseV1Home, materializeTool, sandbox.Functional. ✓
-- Coupling checklist (dispatch, usage, README, CLAUDE.md) → Tasks 2, 8. ✓
+- Coupling checklist (dispatch, usage, README, CLAUDE.md) → Tasks 2, 9. ✓
+- skill-trigger check (empty/placeholder SKILL trigger) → Task 8. ✓
 - **Deviation:** the spec listed a `mise-trust` project check. It is **dropped** from v1: there is no reliable read-only signal for "is this dir trusted", and `mise trust` already runs during `smith install`. Revisit if mise exposes a query. (Recorded here so it is not silently missing.)
 
 **Placeholder scan:** No TBD/TODO. The only pseudo-code (`filepathAbs`/`filepathJoin` in Task 4) is explicitly flagged as intent with an instruction to use `path/filepath` directly.

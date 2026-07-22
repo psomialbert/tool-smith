@@ -98,9 +98,14 @@ Flags: `--fix`, `--json`, optional `--machine` / `--project` to restrict scope.
 | `vendored-sha` | ERROR | no | bundle hash of `.smith/tools/<name>/` ≠ pin (drift/tamper); hint to re-`use` or restore |
 | `installed` | WARN | yes | pinned but not materialized on `.smith/bin`; apply = per-tool materialize |
 | `mise-trust` | WARN | yes | project mise config not trusted; apply = `mise trust` |
+| `skill-trigger` | WARN | no | a vendored `SKILL.md` frontmatter `description` is empty or still the scaffold placeholder (`TODO: sharpen the trigger`) — an un-sharpened trigger means the tool won't be discovered |
 
-`vendored-sha` stays report-only (auto re-vendoring needs a network clone —
-outside the `--fix` safety envelope).
+`vendored-sha` and `skill-trigger` stay report-only. `vendored-sha` because
+auto re-vendoring needs a network clone (outside the `--fix` safety envelope);
+`skill-trigger` because writing a good trigger is human judgment — the check can
+detect a placeholder/empty trigger mechanically, but not that a trigger fails to
+mention a newly-added command. That un-automatable part is covered by the
+cli-creator "Changing a tool" checklist, not by doctor.
 
 ## Refactor scope (shared diagnose/apply)
 
