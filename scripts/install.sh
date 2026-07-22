@@ -1,10 +1,13 @@
 #!/usr/bin/env sh
 # Install the `smith` binary.
 #
-# Two modes, auto-detected:
+#   curl -fsSL https://raw.githubusercontent.com/psomialbert/tool-smith/main/scripts/install.sh | sh
+#
+# Modes, auto-detected:
 #   - inside a clone (cmd/smith present): builds from source via mise+go
-#   - otherwise: downloads the release binary for this platform with `gh`
-#     (needs gh authenticated with access to the repo)
+#   - otherwise: downloads the release binary over https (no auth needed once the
+#     repo is public); falls back to authenticated `gh` if the download 404s
+#     (e.g. the repo is still private).
 #
 # Env:
 #   SMITH_INSTALL_DIR   where to install (default: ~/.local/bin)
@@ -49,18 +52,39 @@ if [ -f "cmd/smith/main.go" ]; then
   install -m 0644 skills/cli-creator/SKILL.md "$skill_dst"
 else
   echo "smith: downloading release binary ($plat) from $REPO..."
-  if ! command -v gh >/dev/null 2>&1; then
-    echo "smith: gh not found — needed to download from a private repo, or run this from a clone" >&2
-    exit 1
-  fi
-  tag="$VERSION"
-  [ "$tag" = latest ] && tag="$(gh release view --repo "$REPO" --json tagName --jq .tagName)"
   tmp="$(mktemp -d)"
-  gh release download "$tag" --repo "$REPO" --pattern "smith-$plat" --dir "$tmp"
-  install -m 0755 "$tmp/smith-$plat" "$dest"
-  # cli-creator authoring skill (best-effort; older releases may not carry it)
-  if gh release download "$tag" --repo "$REPO" --pattern "cli-creator-SKILL.md" --dir "$tmp" 2>/dev/null; then
-    install -m 0644 "$tmp/cli-creator-SKILL.md" "$skill_dst"
+  if [ "$VERSION" = latest ]; then
+    base="https://github.com/$REPO/releases/latest/download"
+  else
+    base="https://github.com/$REPO/releases/download/$VERSION"
+  fi
+  fetch() { # fetch <url> <dest>; nonzero on failure (curl -f fails on 404)
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO "$2" "$1"
+    else
+      return 127
+    fi
+  }
+  if fetch "$base/smith-$plat" "$tmp/smith-$plat" 2>/dev/null; then
+    # Public path: plain https, no auth.
+    install -m 0755 "$tmp/smith-$plat" "$dest"
+    if fetch "$base/cli-creator-SKILL.md" "$tmp/cli-creator-SKILL.md" 2>/dev/null; then
+      install -m 0644 "$tmp/cli-creator-SKILL.md" "$skill_dst"
+    fi
+  elif command -v gh >/dev/null 2>&1; then
+    # Fallback: authenticated gh (repo still private, or no curl/wget).
+    tag="$VERSION"
+    [ "$tag" = latest ] && tag="$(gh release view --repo "$REPO" --json tagName --jq .tagName)"
+    gh release download "$tag" --repo "$REPO" --pattern "smith-$plat" --dir "$tmp"
+    install -m 0755 "$tmp/smith-$plat" "$dest"
+    if gh release download "$tag" --repo "$REPO" --pattern "cli-creator-SKILL.md" --dir "$tmp" 2>/dev/null; then
+      install -m 0644 "$tmp/cli-creator-SKILL.md" "$skill_dst"
+    fi
+  else
+    echo "smith: download failed — need curl/wget (public releases) or gh (private repo)" >&2
+    rm -rf "$tmp"; exit 1
   fi
   rm -rf "$tmp"
 fi

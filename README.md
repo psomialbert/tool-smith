@@ -34,6 +34,9 @@ gate**, exactly like reviewing any dependency.
   pin and refuses on mismatch (go.sum-style). A teammate who clones the
   project and runs `smith install` gets the exact same tools.
 
+See [SECURITY.md](SECURITY.md) for the full threat model — what smith defends,
+what it doesn't, and how to report a vulnerability.
+
 ## Requirements
 
 - [mise](https://mise.jdx.dev) — version/PATH management (smith wraps it)
@@ -48,9 +51,14 @@ gate**, exactly like reviewing any dependency.
 `smith` is a single binary; it needs `mise` on PATH at runtime.
 
 ```sh
+# one-liner (downloads the release binary for your platform)
+curl -fsSL https://raw.githubusercontent.com/psomialbert/tool-smith/main/scripts/install.sh | sh
+
 make install                       # from a clone: build + install to ~/.local/bin
-sh scripts/install.sh              # any machine with gh: download the release binary
 ```
+
+The installer downloads over plain https (no auth); it falls back to `gh` if the
+repo is private.
 
 All paths also install the **cli-creator** authoring skill into
 `~/.claude/skills/cli-creator/` (override with `SKILLS_DIR`/`SMITH_SKILLS_DIR`),
@@ -75,8 +83,9 @@ smith install                      # realize it onto the project PATH
 smith list                         # what's adopted in this project (+ install status)
 greet alice                        # -> hello, alice
 
-# discover others
-smith search json
+# ...or adopt an existing published tool
+smith use github:psomialbert/smith-example-calc@v0.1.1   # a worked example
+smith search json                                        # discover more by topic
 ```
 
 ## Using smith with agents
@@ -210,3 +219,7 @@ mise exec -- go build -o smith ./cmd/smith
 mise exec -- go test ./...
 bash scripts/adopt-e2e.sh          # full adoption loop, local git repos
 ```
+
+## License
+
+[Apache-2.0](LICENSE).
