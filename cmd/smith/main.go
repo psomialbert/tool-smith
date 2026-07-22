@@ -47,6 +47,8 @@ func main() {
 	switch cmd {
 	case "new":
 		err = cmdNew(paths, args)
+	case "publish":
+		err = cmdPublish(paths, args)
 	case "use":
 		err = cmdUse(paths, args)
 	case "install":
@@ -90,6 +92,9 @@ func usage() {
 Usage:
   smith new <name> [--runtime bash|python|go|python-uv] [--desc <text>]
                                  scaffold a tool (a future git repo)
+  smith publish (--public|--private) [--repo owner/name] [--tag v<x>]
+                                 from a tool dir: git + create/push repo, tag,
+                                 topic-tag smith-tool (make it adoptable)
   smith search [query]           discover tool repos (GitHub topic: smith-tool)
   smith use <repo|path>[@<ver>]  adopt a tool into this project: sandboxed
                                  self-test, vendor into .smith/tools/, pin in

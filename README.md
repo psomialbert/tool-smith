@@ -69,11 +69,10 @@ so authoring agents get the CLI contract without setup. Prebuilt binaries
 ## Quickstart
 
 ```sh
-# author a tool, make it a repo
+# author a tool
 smith new greet --runtime bash --desc "print a greeting"
 cd greet && $EDITOR greet selftest.sh SKILL.md
-git init && git add -A && git commit -m "greet v0.1.0" && git tag v0.1.0
-# (push it: own repo, org repo, or embed in a project; topic-tag it smith-tool)
+smith publish --public         # git + create/push repo, tag v0.1.0, topic-tag smith-tool
 
 # in a project, adopt it — a reviewable commit
 smith use ../greet@v0.1.0          # sandboxed self-test, vendor, pin

@@ -21,14 +21,19 @@ smith new <name> --runtime bash|python|go|python-uv --desc "one-line trigger-wor
 #   edit ./<name>/SKILL.md         <- sharpen the trigger description
 #   edit ./<name>/README.md        <- what it does / how to adopt / contract
 
-# make it a repo and tag a version:
-cd <name> && git init && git add -A && git commit -m "<name> v0.1.0" && git tag v0.1.0
-# publish it (own repo / org repo / or embed in a project) and topic-tag it "smith-tool"
+# publish it — a HUMAN step (creates a shareable repo; like merging an adoption):
+cd <name> && smith publish --public   # git + create/push repo, tag v<version>, topic-tag smith-tool
 ```
 
 `smith new` scaffolds into `./<name>` in the current directory (not a hidden
 drafts area). The entrypoint filename depends on runtime: `bash`/`python` →
 `<name>`; `go` → `main.go`; `python-uv` → `<name>.py`.
+
+`smith publish` (`--public` or `--private`) does the git init/commit, creates and
+pushes the GitHub repo, tags `v<manifest.version>`, and topic-tags it
+`smith-tool` so `smith search` finds it. It's idempotent — re-run after a bump to
+push the new tag. Publishing creates a public artifact, so a **human** runs it;
+you (the agent) author and propose.
 
 ## Adoption (how the tool gets used — usually a human step)
 

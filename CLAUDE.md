@@ -41,6 +41,13 @@ sync silently. **Before committing, verify each still matches actual behavior:**
 - **Change the adopt pipeline** (clone → checkout → self-test → vendor → pin) →
   it's `adoptAtVersion` in `cmd/smith/adopt.go`, shared by `smith use` and
   `smith upgrade`. Change it once there; don't fork the logic into either caller.
+
+## Human-owned commands
+
+`smith publish` and merging an adoption PR create/authorize shared artifacts, so
+they're **human-owned** (agents author + propose; humans publish + adopt).
+`publish` requires an explicit `--public`/`--private` and never runs itself as a
+side effect of another command.
 - **Add a health check** → add it to the `doctorChecks()` registry in
   `cmd/smith/doctor.go` as a diagnose/apply pair. Reuse the shared halves
   (`activationState`, `gitignoreMissing`, `materializeTool`, `diagnoseV1Home`,
