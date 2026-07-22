@@ -402,6 +402,47 @@ then run `+"`smith install`"+` to put it on PATH for this project.
 
 // ---------------------------------------------------------------- smith install
 
+// materializeTool realizes one tool onto binDir per its runtime: go builds the
+// vendored source, python-uv warms a cache + writes an offline launcher, and
+// bash/python symlink the entrypoint. binDir is the relative .smith/bin;
+// absBinDir is its absolute form (used for go build output). Callers verify the
+// vendored sha before calling this.
+func materializeTool(p config.Paths, name string, t ProjTool, binDir, absBinDir string) error {
+	dir := filepath.Join(smithDir, "tools", name)
+	link := filepath.Join(binDir, name)
+	_ = os.Remove(link)
+	switch t.Runtime {
+	case "go":
+		if err := buildGoTool(dir, filepath.Join(absBinDir, name)); err != nil {
+			return fmt.Errorf("%s: go build failed: %w", name, err)
+		}
+	case "python-uv":
+		if _, err := exec.LookPath("uv"); err != nil {
+			return fmt.Errorf("%s: uv not found on PATH", name)
+		}
+		scriptAbs, _ := filepath.Abs(filepath.Join(dir, name+".py"))
+		cacheAbs, _ := filepath.Abs(filepath.Join(smithDir, "cache", name))
+		if err := os.MkdirAll(cacheAbs, 0o755); err != nil {
+			return err
+		}
+		cwd, _ := os.Getwd()
+		if err := warmUVCache(p, cwd, scriptAbs, cacheAbs); err != nil {
+			return fmt.Errorf("%s: warming uv cache failed: %w", name, err)
+		}
+		if err := os.WriteFile(link, []byte(pythonUVLauncher(scriptAbs, cacheAbs)), 0o755); err != nil {
+			return err
+		}
+	default: // bash / python — the entrypoint IS the script
+		if err := os.Chmod(filepath.Join(dir, t.Entrypoint), 0o755); err != nil {
+			return err
+		}
+		if err := os.Symlink(filepath.Join("..", "tools", name, t.Entrypoint), link); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func cmdInstall(p config.Paths, args []string) error {
 	lock, err := loadProjLock()
 	if err != nil {
@@ -436,40 +477,8 @@ func cmdInstall(p config.Paths, args []string) error {
 		if sum != t.Sha256 {
 			return fmt.Errorf("%s: vendored source sha mismatch (pinned %s, got %s) — review %s and re-adopt", name, t.Sha256[:12], sum[:12], dir)
 		}
-		link := filepath.Join(binDir, name)
-		_ = os.Remove(link)
-		// Materialize the runnable per runtime.
-		switch t.Runtime {
-		case "go":
-			// Build the vendored source locally (per-platform, git-ignored).
-			if err := buildGoTool(dir, filepath.Join(absBinEarly, name)); err != nil {
-				return fmt.Errorf("%s: go build failed: %w", name, err)
-			}
-		case "python-uv":
-			// Warm a git-ignored tool-local cache from the hash-locked deps,
-			// then write an offline launcher onto the bin.
-			if _, err := exec.LookPath("uv"); err != nil {
-				return fmt.Errorf("%s: uv not found on PATH", name)
-			}
-			scriptAbs, _ := filepath.Abs(filepath.Join(dir, name+".py"))
-			cacheAbs, _ := filepath.Abs(filepath.Join(smithDir, "cache", name))
-			if err := os.MkdirAll(cacheAbs, 0o755); err != nil {
-				return err
-			}
-			cwd, _ := os.Getwd()
-			if err := warmUVCache(p, cwd, scriptAbs, cacheAbs); err != nil {
-				return fmt.Errorf("%s: warming uv cache failed: %w", name, err)
-			}
-			if err := os.WriteFile(link, []byte(pythonUVLauncher(scriptAbs, cacheAbs)), 0o755); err != nil {
-				return err
-			}
-		default: // bash / python — the entrypoint IS the script
-			if err := os.Chmod(filepath.Join(dir, t.Entrypoint), 0o755); err != nil {
-				return err
-			}
-			if err := os.Symlink(filepath.Join("..", "tools", name, t.Entrypoint), link); err != nil {
-				return err
-			}
+		if err := materializeTool(p, name, t, binDir, absBinEarly); err != nil {
+			return err
 		}
 	}
 	if err := ensureActivation(".", absBinEarly); err != nil {
@@ -511,9 +520,14 @@ func jsonPrint(v any) error {
 	return enc.Encode(v)
 }
 
-func ensureProjectGitignore() {
-	gi := ".gitignore"
-	raw, _ := os.ReadFile(gi)
+// gitignoreMissing returns the required ignore entries not present in
+// ./.gitignore. .smith/bin (symlinks + built binaries), .smith/cache (warmed uv
+// caches), and mise.local.toml (activation with a machine-absolute path) are all
+// generated per machine by `smith install`; the vendored source + the pin are
+// what's committed. Committing mise.local.toml would ship one machine's absolute
+// path and break `smith install` for peers.
+func gitignoreMissing() []string {
+	raw, _ := os.ReadFile(".gitignore")
 	content := string(raw)
 	has := func(want string) bool {
 		for _, l := range strings.Split(content, "\n") {
@@ -523,22 +537,29 @@ func ensureProjectGitignore() {
 		}
 		return false
 	}
-	// .smith/bin (symlinks + built binaries), .smith/cache (warmed uv caches),
-	// and mise.local.toml (activation with a machine-absolute path) are all
-	// generated per machine by `smith install`; the vendored source + the pin
-	// are what's committed. Committing mise.local.toml would ship one machine's
-	// absolute path and break `smith install` for peers.
+	var missing []string
 	for _, want := range []string{smithDir + "/bin/", smithDir + "/cache/", "mise.local.toml"} {
 		if !has(want) {
-			if content != "" && !strings.HasSuffix(content, "\n") {
-				content += "\n"
-			}
-			content += want + "\n"
+			missing = append(missing, want)
 		}
 	}
-	if content != string(raw) {
-		_ = os.WriteFile(gi, []byte(content), 0o644)
+	return missing
+}
+
+func ensureProjectGitignore() {
+	missing := gitignoreMissing()
+	if len(missing) == 0 {
+		return
 	}
+	raw, _ := os.ReadFile(".gitignore")
+	content := string(raw)
+	for _, want := range missing {
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		content += want + "\n"
+	}
+	_ = os.WriteFile(".gitignore", []byte(content), 0o644)
 }
 
 // ---------------------------------------------------------------- smith search

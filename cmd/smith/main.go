@@ -61,6 +61,8 @@ func main() {
 		err = cmdAllowlist(paths, args)
 	case "migrate":
 		err = cmdMigrate(paths, args)
+	case "doctor":
+		err = cmdDoctor(paths, args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -95,6 +97,8 @@ Usage:
   smith allowlist                show the org adoption policy (if any)
   smith migrate                  clean up retired v1 files in SMITH_HOME
                                  (backs them up first; safe to re-run)
+  smith doctor [--fix] [--json]  diagnose machine + project health; --fix repairs
+                                 safe issues (activation, gitignore, v1 cruft)
   smith version                  print version
 
 Trust is per-project: a tool vendored + pinned in the reviewed .smith/tools.yaml
@@ -531,44 +535,66 @@ func openInEditor(ed, base string, files []string) error {
 
 // ---------------------------------------------------------------- shared helpers (adopt.go)
 
-// ensureActivation adds env._.path = [binDir] to the project's mise.local.toml
-// so adopted tools land on PATH. Refuses to guess on exotic existing config.
-func ensureActivation(projectDir, binDir string) error {
-	path := filepath.Join(projectDir, "mise.local.toml")
-	pathLine := fmt.Sprintf("_.path = [%q]", binDir)
-	raw, err := os.ReadFile(path)
+// activationState classifies mise.local.toml without mutating it:
+//   ok      – already activates binDir
+//   missing – no file (create one)
+//   stale   – a smith-managed _.path pointing elsewhere (heal it): a v1
+//             ~/.toolsmith store path, or a committed foreign .smith/bin
+//   foreign – a user-authored _.path (do not touch)
+//   inject  – file exists with no _.path (add one under [env])
+func activationState(projectDir, binDir string) string {
+	raw, err := os.ReadFile(filepath.Join(projectDir, "mise.local.toml"))
 	if os.IsNotExist(err) {
-		return os.WriteFile(path, []byte("# managed by smith: puts adopted tools on PATH\n[env]\n"+pathLine+"\n"), 0o644)
+		return "missing"
 	}
 	if err != nil {
-		return err
+		return "foreign" // unreadable: refuse to touch
 	}
 	text := string(raw)
 	if strings.Contains(text, binDir) {
-		return nil
+		return "ok"
 	}
-	// Auto-heal a stale smith-managed activation. Two cases land here: a v1
-	// file pointing PATH at ~/.toolsmith/store/.../bin, and a mise.local.toml
-	// that got committed with another machine's absolute .smith/bin path (it's
-	// gitignored now, but existing repos may still carry one). Either way the
-	// file is ours, so rewrite its _.path to this machine's binDir.
-	if lines, ok := healStaleActivation(strings.Split(text, "\n"), pathLine); ok {
-		fmt.Fprintf(os.Stderr, "[smith] healed stale activation in mise.local.toml → %s\n", binDir)
-		return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+	if _, ok := healStaleActivation(strings.Split(text, "\n"), ""); ok {
+		return "stale"
 	}
 	if strings.Contains(text, "_.path") {
+		return "foreign"
+	}
+	return "inject"
+}
+
+// ensureActivation makes the project's mise.local.toml put binDir on PATH.
+// Detection lives in activationState so `smith doctor` can diagnose without
+// mutating; this applies the fix for each state.
+func ensureActivation(projectDir, binDir string) error {
+	pathLine := fmt.Sprintf("_.path = [%q]", binDir)
+	path := filepath.Join(projectDir, "mise.local.toml")
+	switch activationState(projectDir, binDir) {
+	case "ok":
+		return nil
+	case "missing":
+		return os.WriteFile(path, []byte("# managed by smith: puts adopted tools on PATH\n[env]\n"+pathLine+"\n"), 0o644)
+	case "stale":
+		raw, _ := os.ReadFile(path)
+		lines, _ := healStaleActivation(strings.Split(string(raw), "\n"), pathLine)
+		fmt.Fprintf(os.Stderr, "[smith] healed stale activation in mise.local.toml → %s\n", binDir)
+		return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+	case "foreign":
 		return fmt.Errorf("mise.local.toml already sets env._.path; add %q to it manually", binDir)
-	}
-	if i := strings.Index(text, "[env]"); i >= 0 {
-		at := i + len("[env]")
-		text = text[:at] + "\n" + pathLine + text[at:]
-	} else {
-		if text != "" && !strings.HasSuffix(text, "\n") {
-			text += "\n"
+	default: // inject
+		raw, _ := os.ReadFile(path)
+		text := string(raw)
+		if i := strings.Index(text, "[env]"); i >= 0 {
+			at := i + len("[env]")
+			text = text[:at] + "\n" + pathLine + text[at:]
+		} else {
+			if text != "" && !strings.HasSuffix(text, "\n") {
+				text += "\n"
+			}
+			text += "\n[env]\n" + pathLine + "\n"
 		}
-		text += "\n[env]\n" + pathLine + "\n"
+		return os.WriteFile(path, []byte(text), 0o644)
 	}
-	return os.WriteFile(path, []byte(text), 0o644)
 }
 
 // healStaleActivation rewrites the `_.path` line of a smith-managed
