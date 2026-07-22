@@ -536,12 +536,13 @@ func openInEditor(ed, base string, files []string) error {
 // ---------------------------------------------------------------- shared helpers (adopt.go)
 
 // activationState classifies mise.local.toml without mutating it:
-//   ok      – already activates binDir
-//   missing – no file (create one)
-//   stale   – a smith-managed _.path pointing elsewhere (heal it): a v1
-//             ~/.toolsmith store path, or a committed foreign .smith/bin
-//   foreign – a user-authored _.path (do not touch)
-//   inject  – file exists with no _.path (add one under [env])
+//
+//	ok      – already activates binDir
+//	missing – no file (create one)
+//	stale   – a smith-managed _.path pointing elsewhere (heal it): a v1
+//	          ~/.toolsmith store path, or a committed foreign .smith/bin
+//	foreign – a user-authored _.path (do not touch)
+//	inject  – file exists with no _.path (add one under [env])
 func activationState(projectDir, binDir string) string {
 	raw, err := os.ReadFile(filepath.Join(projectDir, "mise.local.toml"))
 	if os.IsNotExist(err) {

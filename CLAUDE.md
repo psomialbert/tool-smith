@@ -72,4 +72,5 @@ agent-loaded.
   merge). Direct pushes of tags are fine.
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 - Go is pinned via `mise.toml`; run Go through `mise exec -- go` (or `make`).
-- Run `make test` + `mise exec -- go vet ./...` before pushing.
+- Run `make test` + `mise exec -- go vet ./...` + `mise exec -- gofmt -l .`
+  before pushing (CI has a format check; `gofmt -l .` must print nothing).
