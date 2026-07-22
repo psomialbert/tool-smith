@@ -38,6 +38,9 @@ sync silently. **Before committing, verify each still matches actual behavior:**
   Runtimes section.
 - **Change the adoption/trust flow** → cli-creator skill, README, and the tool
   template README all describe it; update together.
+- **Change the adopt pipeline** (clone → checkout → self-test → vendor → pin) →
+  it's `adoptAtVersion` in `cmd/smith/adopt.go`, shared by `smith use` and
+  `smith upgrade`. Change it once there; don't fork the logic into either caller.
 - **Add a health check** → add it to the `doctorChecks()` registry in
   `cmd/smith/doctor.go` as a diagnose/apply pair. Reuse the shared halves
   (`activationState`, `gitignoreMissing`, `materializeTool`, `diagnoseV1Home`,

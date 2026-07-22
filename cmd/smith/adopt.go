@@ -279,22 +279,45 @@ func cmdUse(p config.Paths, args []string) error {
 			source, strings.Join(pats, ", "), filepath.Join(p.Home, "config.yaml"))
 	}
 
-	tmp, err := os.MkdirTemp("", "smith-use-")
+	res, err := adoptAtVersion(p, clonedURL, source, version)
 	if err != nil {
 		return err
+	}
+	fmt.Printf("adopted %s@%s into %s/\n", res.Name, res.Version, smithDir)
+	fmt.Printf("  source: %s\n  vendored: %s  (sha256=%s)\n", clonedURL, res.Dst, res.Sha256[:12])
+	fmt.Printf(`
+This is a reviewable change — the tool's source is now in your project:
+  git add %s && git commit    # the adoption decision, for your team to review
+then run `+"`smith install`"+` to put it on PATH for this project.
+`, smithDir)
+	return nil
+}
+
+// adoptResult is what adoptAtVersion pinned.
+type adoptResult struct{ Name, Version, Sha256, Dst string }
+
+// adoptAtVersion clones clonedURL, checks out version ("" = the repo's
+// describe), loads the manifest, materializes + self-tests sandboxed, vendors
+// the reviewable source into .smith/tools/<name>/, and updates+saves the pin.
+// It is cmdUse's core, shared with `smith upgrade`. displaySource is used only
+// in error messages; the caller is responsible for any allowlist check.
+func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (adoptResult, error) {
+	tmp, err := os.MkdirTemp("", "smith-adopt-")
+	if err != nil {
+		return adoptResult{}, err
 	}
 	defer os.RemoveAll(tmp)
 	clone := filepath.Join(tmp, "repo")
 	cc := exec.Command("git", "clone", "--quiet", clonedURL, clone)
 	cc.Stdout, cc.Stderr = os.Stderr, os.Stderr
 	if err := cc.Run(); err != nil {
-		return fmt.Errorf("cloning %s: %w", clonedURL, err)
+		return adoptResult{}, fmt.Errorf("cloning %s: %w", clonedURL, err)
 	}
 	if version != "" {
 		co := exec.Command("git", "-C", clone, "checkout", "--quiet", version)
 		co.Stdout, co.Stderr = os.Stderr, os.Stderr
 		if err := co.Run(); err != nil {
-			return fmt.Errorf("checkout %s: %w", version, err)
+			return adoptResult{}, fmt.Errorf("checkout %s: %w", version, err)
 		}
 	} else {
 		out, _ := exec.Command("git", "-C", clone, "describe", "--tags", "--always").Output()
@@ -303,12 +326,12 @@ func cmdUse(p config.Paths, args []string) error {
 
 	m, err := scaffold.LoadManifest(clone)
 	if err != nil {
-		return fmt.Errorf("%s is not a smith tool (no valid manifest.yaml): %w", source, err)
+		return adoptResult{}, fmt.Errorf("%s is not a smith tool (no valid manifest.yaml): %w", displaySource, err)
 	}
 	switch m.Runtime {
 	case "bash", "python", "go", "python-uv":
 	default:
-		return fmt.Errorf("runtime %q not yet supported by `smith use` (bash/python/go/python-uv)", m.Runtime)
+		return adoptResult{}, fmt.Errorf("runtime %q not yet supported (bash/python/go/python-uv)", m.Runtime)
 	}
 
 	// Compiled/wrapped runtimes materialize a runnable before the self-test.
@@ -316,46 +339,46 @@ func cmdUse(p config.Paths, args []string) error {
 	switch m.Runtime {
 	case "go":
 		if err := buildGoTool(clone, entry); err != nil {
-			return fmt.Errorf("go build failed — not adopted: %w", err)
+			return adoptResult{}, fmt.Errorf("go build failed — not adopted: %w", err)
 		}
 	case "python-uv":
 		if _, err := exec.LookPath("uv"); err != nil {
-			return fmt.Errorf("uv not found on PATH (required for python-uv tools)")
+			return adoptResult{}, fmt.Errorf("uv not found on PATH (required for python-uv tools)")
 		}
 		script := m.Name + ".py"
 		if err := uvLockScript(clone, script); err != nil {
-			return fmt.Errorf("uv lock failed — not adopted: %w", err)
+			return adoptResult{}, fmt.Errorf("uv lock failed — not adopted: %w", err)
 		}
 		cacheAbs, _ := filepath.Abs(filepath.Join(clone, "uv-cache"))
 		scriptAbs, _ := filepath.Abs(filepath.Join(clone, script))
 		if err := warmUVCache(p, clone, scriptAbs, cacheAbs); err != nil {
-			return fmt.Errorf("warming uv cache failed — not adopted: %w", err)
+			return adoptResult{}, fmt.Errorf("warming uv cache failed — not adopted: %w", err)
 		}
 		// Self-test runs the offline launcher (mirrors cache, no network).
 		entry = filepath.Join(clone, ".smith-launch")
 		if err := os.WriteFile(entry, []byte(pythonUVLauncher(scriptAbs, cacheAbs)), 0o755); err != nil {
-			return err
+			return adoptResult{}, err
 		}
 	}
 	if err := os.Chmod(entry, 0o755); err != nil {
-		return fmt.Errorf("entrypoint %s: %w", m.Entrypoint, err)
+		return adoptResult{}, fmt.Errorf("entrypoint %s: %w", m.Entrypoint, err)
 	}
 
 	// Sandboxed self-test before vendoring: unreviewed code stays contained
 	// at adopt time; a failing self-test blocks adoption.
 	fmt.Fprintf(os.Stderr, "[smith] self-testing %s@%s (sandboxed) before adopting...\n", m.Name, version)
 	if err := runSelfTest(p, clone, entry); err != nil {
-		return fmt.Errorf("self-test FAILED — not adopted: %w", err)
+		return adoptResult{}, fmt.Errorf("self-test FAILED — not adopted: %w", err)
 	}
 
 	// Vendor the reviewable SOURCE (not built artifacts) into the project.
 	src := sourceFiles(m.Runtime, m.Entrypoint, m.Name)
 	dst := filepath.Join(smithDir, "tools", m.Name)
 	if err := os.RemoveAll(dst); err != nil {
-		return err
+		return adoptResult{}, err
 	}
 	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return err
+		return adoptResult{}, err
 	}
 	for _, f := range src {
 		raw, rerr := os.ReadFile(filepath.Join(clone, f))
@@ -363,41 +386,33 @@ func cmdUse(p config.Paths, args []string) error {
 			continue
 		}
 		if rerr != nil {
-			return rerr
+			return adoptResult{}, rerr
 		}
 		mode := os.FileMode(0o644)
 		if f == m.Entrypoint || f == "selftest.sh" {
 			mode = 0o755
 		}
 		if err := os.WriteFile(filepath.Join(dst, f), raw, mode); err != nil {
-			return err
+			return adoptResult{}, err
 		}
 	}
 	sum, err := bundleHash(dst, src)
 	if err != nil {
-		return err
+		return adoptResult{}, err
 	}
 
 	lock, err := loadProjLock()
 	if err != nil {
-		return err
+		return adoptResult{}, err
 	}
 	lock.Tools[m.Name] = ProjTool{
 		Source: clonedURL, Version: version, Sha256: sum,
 		Entrypoint: m.Entrypoint, Runtime: m.Runtime,
 	}
 	if err := saveProjLock(lock); err != nil {
-		return err
+		return adoptResult{}, err
 	}
-
-	fmt.Printf("adopted %s@%s into %s/\n", m.Name, version, smithDir)
-	fmt.Printf("  source: %s\n  vendored: %s  (sha256=%s)\n", clonedURL, dst, sum[:12])
-	fmt.Printf(`
-This is a reviewable change — the tool's source is now in your project:
-  git add %s && git commit    # the adoption decision, for your team to review
-then run `+"`smith install`"+` to put it on PATH for this project.
-`, smithDir)
-	return nil
+	return adoptResult{Name: m.Name, Version: version, Sha256: sum, Dst: dst}, nil
 }
 
 // ---------------------------------------------------------------- smith install
