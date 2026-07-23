@@ -42,6 +42,32 @@ func TestLoadManifestRejectsTraversal(t *testing.T) {
 	}
 }
 
+// TestLoadManifestRejectsControlBytes guards the review-display fix: version and
+// runtime are printed into the reviewer's terminal (review header, TUI header,
+// capability summary) before any code is read, so a manifest can't be allowed to
+// smuggle terminal escape sequences through them.
+func TestLoadManifestRejectsControlBytes(t *testing.T) {
+	cases := []struct {
+		name, manifest string
+	}{
+		// YAML double-quoted "\e" decodes to a raw ESC byte.
+		{"version-esc", "name: ok\nversion: \"0.1.0\\e[2J\"\nentrypoint: x\nruntime: bash\n"},
+		{"runtime-esc", "name: ok\nversion: 0.1.0\nentrypoint: x\nruntime: \"bash\\u001b[1m\"\n"},
+		{"version-cr", "name: ok\nversion: \"1.0\\r\"\nentrypoint: x\nruntime: bash\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "manifest.yaml"), []byte(c.manifest), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadManifest(dir); err == nil {
+				t.Fatalf("LoadManifest accepted a control-byte manifest: %q", c.manifest)
+			}
+		})
+	}
+}
+
 // TestManifestOmitsDescriptionSkillKeepsIt locks in the single-source-of-truth
 // for a tool's description: it lives in the SKILL.md frontmatter (the agent
 // trigger), NOT in manifest.yaml. Two descriptions drift — an agent updated the

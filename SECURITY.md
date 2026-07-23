@@ -39,7 +39,13 @@ agent into adopting or running something it shouldn't.
   (`sandbox: {network: true, write: [...]}`). smith **surfaces** them at
   adoption ("⚠ requests capabilities: network egress; write: …") so a reviewer
   sees them, and **enforces** them at the self-test — the tool gets exactly what
-  it declared and nothing more; everything else stays denied.
+  it declared and nothing more; everything else stays denied. Because the
+  manifest is attacker-controlled and its self-test runs *before* a human reads
+  the code, write grants to high-value locations — the filesystem root, system
+  directories, the home directory (or a parent), and credential stores
+  (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`) — are **refused
+  outright**, not merely flagged; a tool's own scratch needs are already covered
+  by the always-granted CWD + TMP.
 - **Integrity / reproducibility.** Each vendored bundle is content-hashed and
   pinned. `smith install` and `smith verify --frozen` re-hash and refuse on
   mismatch (go.sum-style), so a tampered vendored tree is caught, and a teammate

@@ -43,9 +43,9 @@ smith new <name> --runtime bash|python|go|python-uv --desc "one-line trigger-wor
 cd <name> && smith publish --public   # git + create/push repo, tag v<version>, topic-tag smith-tool
 ```
 
-`smith new` scaffolds into `./<name>` in the current directory (not a hidden
-drafts area). The entrypoint filename depends on runtime: `bash`/`python` →
-`<name>`; `go` → `main.go`; `python-uv` → `<name>.py`.
+`smith new` scaffolds into `./<name>` in the current directory (a normal
+directory you edit and commit). The entrypoint filename depends on runtime:
+`bash`/`python` → `<name>`; `go` → `main.go`; `python-uv` → `<name>.py`.
 
 `smith publish` (`--public` or `--private`) does the git init/commit, creates and
 pushes the GitHub repo, tags `v<manifest.version>`, and topic-tags it
@@ -74,14 +74,14 @@ the reviewer to rubber-stamp it.
 
 A tool's `SKILL.md` says **what the tool does, its contract, and when to reach
 for it** — and nothing about how smith works. Do **not** write about adoption,
-trust, tiers, sandboxing, PATH, or `smith` subcommands in a tool's `SKILL.md`.
+trust, sandboxing, PATH, or `smith` subcommands in a tool's `SKILL.md`.
 Reasons this matters:
 
 - That mechanism is smith's concern and it **changes between versions**. Baked
   into a tool skill it goes stale, and it's duplicated into every project that
   vendors the tool — impossible to fix centrally.
 - By the time an agent reads the skill, `smith install` has already put the tool
-  on PATH — so any "you may be sandboxed / check the tier" note is never true.
+  on PATH — so any "you may be sandboxed" note is never true.
 - A tool asserting its own trust status is meaningless anyway.
 
 Only smith itself (its `--help`/README) and this cli-creator skill describe how

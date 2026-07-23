@@ -7,14 +7,16 @@
 #   - inside a clone (cmd/smith present): builds from source via mise+go
 #   - otherwise: downloads the release binary over https (no auth needed once the
 #     repo is public); falls back to authenticated `gh` if the download 404s
-#     (e.g. the repo is still private). The download is checksum-verified against
-#     the release's SHA256SUMS when that asset is present.
+#     (e.g. the repo is still private). Downloads are checksum-verified against
+#     the release's SHA256SUMS; a release without SHA256SUMS is refused unless
+#     SMITH_ALLOW_UNVERIFIED=1.
 #
 # Env:
-#   SMITH_INSTALL_DIR   where to install (default: ~/.local/bin)
-#   SMITH_VERSION       release tag to fetch in download mode (default: latest)
-#   SMITH_REPO          owner/repo for download mode (default: psomialbert/tool-smith)
+#   SMITH_INSTALL_DIR       where to install (default: ~/.local/bin)
+#   SMITH_VERSION           release tag to fetch in download mode (default: latest)
+#   SMITH_REPO              owner/repo for download mode (default: psomialbert/tool-smith)
 #   SMITH_SKILLS_DIR / SKILLS_DIR   where to install the cli-creator skill
+#   SMITH_ALLOW_UNVERIFIED  set to 1 to install even when SHA256SUMS is absent
 set -eu
 
 INSTALL_DIR="${SMITH_INSTALL_DIR:-$HOME/.local/bin}"
@@ -23,26 +25,6 @@ INSTALL_DIR="${SMITH_INSTALL_DIR:-$HOME/.local/bin}"
 SKILLS_DIR="${SMITH_SKILLS_DIR:-${SKILLS_DIR:-$HOME/.claude/skills}}"
 REPO="${SMITH_REPO:-psomialbert/tool-smith}"
 VERSION="${SMITH_VERSION:-latest}"
-
-os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-case "$os" in
-  darwin) os=darwin ;;
-  linux) os=linux ;;
-  *) echo "smith: unsupported OS: $os (macOS/Linux only)" >&2; exit 1 ;;
-esac
-arch="$(uname -m)"
-case "$arch" in
-  arm64|aarch64) arch=arm64 ;;
-  x86_64|amd64) arch=amd64 ;;
-  *) echo "smith: unsupported arch: $arch" >&2; exit 1 ;;
-esac
-plat="$os-$arch"
-
-mkdir -p "$INSTALL_DIR"
-dest="$INSTALL_DIR/smith"
-
-skill_dst="$SKILLS_DIR/cli-creator/SKILL.md"
-mkdir -p "$SKILLS_DIR/cli-creator"
 
 # sha256_of <file> — print the hex sha256, or "" if no tool is available.
 sha256_of() {
@@ -55,7 +37,7 @@ sha256_of() {
   fi
 }
 
-# verify_checksum <binary> <sumsfile> <name-in-sums> — hard-fail on mismatch.
+# verify_checksum <file> <sumsfile> <name-in-sums> — hard-fail on mismatch.
 verify_checksum() {
   want="$(grep " $3\$" "$2" 2>/dev/null | cut -d' ' -f1 | head -1)"
   if [ -z "$want" ]; then
@@ -73,7 +55,23 @@ verify_checksum() {
   fi
 }
 
-if [ -f "cmd/smith/main.go" ]; then
+detect_platform() {
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  case "$os" in
+    darwin) os=darwin ;;
+    linux) os=linux ;;
+    *) echo "smith: unsupported OS: $os (macOS/Linux only)" >&2; exit 1 ;;
+  esac
+  arch="$(uname -m)"
+  case "$arch" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=amd64 ;;
+    *) echo "smith: unsupported arch: $arch" >&2; exit 1 ;;
+  esac
+  plat="$os-$arch"
+}
+
+build_from_source() {
   echo "smith: building from source ($plat)..."
   if ! command -v mise >/dev/null 2>&1; then
     echo "smith: mise not found — needed to build (https://mise.jdx.dev)" >&2
@@ -83,7 +81,10 @@ if [ -f "cmd/smith/main.go" ]; then
     -ldflags "-X main.version=$(git describe --tags --always 2>/dev/null || echo dev)" \
     -o "$dest" ./cmd/smith
   install -m 0644 skills/cli-creator/SKILL.md "$skill_dst"
-else
+  skill_installed=1
+}
+
+download_release() {
   echo "smith: downloading release binary ($plat) from $REPO..."
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -101,56 +102,94 @@ else
       return 127
     fi
   }
+
+  # Stage all three assets into $tmp; verification + install is shared below so
+  # a missing SHA256SUMS fails closed on every path, not just the https one.
+  got_binary=0; got_sums=0; got_skill=0
   if fetch "$base/smith-$plat" "$tmp/smith-$plat" 2>/dev/null; then
-    # Public path: plain https, no auth. Verify against SHA256SUMS if present.
-    if fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
-      verify_checksum "$tmp/smith-$plat" "$tmp/SHA256SUMS" "smith-$plat" || exit 1
-    else
-      echo "smith: note: release has no SHA256SUMS asset; integrity rests on TLS only" >&2
-    fi
-    install -m 0755 "$tmp/smith-$plat" "$dest"
-    if fetch "$base/cli-creator-SKILL.md" "$tmp/cli-creator-SKILL.md" 2>/dev/null; then
-      install -m 0644 "$tmp/cli-creator-SKILL.md" "$skill_dst"
-    fi
+    got_binary=1
+    fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null && got_sums=1
+    fetch "$base/cli-creator-SKILL.md" "$tmp/cli-creator-SKILL.md" 2>/dev/null && got_skill=1
   elif command -v gh >/dev/null 2>&1; then
     # Fallback: authenticated gh (repo still private, or no curl/wget).
     tag="$VERSION"
     [ "$tag" = latest ] && tag="$(gh release view --repo "$REPO" --json tagName --jq .tagName)"
-    gh release download "$tag" --repo "$REPO" --pattern "smith-$plat" --dir "$tmp" --clobber
-    if gh release download "$tag" --repo "$REPO" --pattern "SHA256SUMS" --dir "$tmp" --clobber 2>/dev/null; then
-      verify_checksum "$tmp/smith-$plat" "$tmp/SHA256SUMS" "smith-$plat" || exit 1
-    else
-      echo "smith: note: release has no SHA256SUMS asset; integrity rests on gh/TLS only" >&2
-    fi
-    install -m 0755 "$tmp/smith-$plat" "$dest"
-    if gh release download "$tag" --repo "$REPO" --pattern "cli-creator-SKILL.md" --dir "$tmp" --clobber 2>/dev/null; then
-      install -m 0644 "$tmp/cli-creator-SKILL.md" "$skill_dst"
+    if gh release download "$tag" --repo "$REPO" --pattern "smith-$plat" --dir "$tmp" --clobber; then
+      got_binary=1
+      gh release download "$tag" --repo "$REPO" --pattern "SHA256SUMS" --dir "$tmp" --clobber 2>/dev/null && got_sums=1
+      gh release download "$tag" --repo "$REPO" --pattern "cli-creator-SKILL.md" --dir "$tmp" --clobber 2>/dev/null && got_skill=1
     fi
   else
     echo "smith: download failed — need curl/wget (public releases) or gh (private repo)" >&2
     exit 1
   fi
-fi
+  if [ "$got_binary" != 1 ]; then
+    echo "smith: download failed — could not fetch smith-$plat" >&2
+    exit 1
+  fi
 
-chmod +x "$dest"
-# A wrong-arch or truncated binary must fail the install loudly, not silently
-# print "(?)" and exit 0.
-if ! ver="$("$dest" version 2>/dev/null)"; then
-  echo "smith: installed binary at $dest does not run (wrong arch or corrupt download)" >&2
-  rm -f "$dest"
-  exit 1
-fi
-echo "installed: $dest ($ver)"
-[ -f "$skill_dst" ] && echo "installed skill: $skill_dst"
+  # Integrity gate. A release missing SHA256SUMS is refused unless the operator
+  # explicitly opts out — silently installing an unverified binary/skill is the
+  # exact fail-open we want to avoid.
+  if [ "$got_sums" = 1 ]; then
+    verify_checksum "$tmp/smith-$plat" "$tmp/SHA256SUMS" "smith-$plat" || exit 1
+  elif [ "${SMITH_ALLOW_UNVERIFIED:-0}" = 1 ]; then
+    echo "smith: WARNING: release has no SHA256SUMS; installing UNVERIFIED (SMITH_ALLOW_UNVERIFIED=1)" >&2
+  else
+    echo "smith: release has no SHA256SUMS asset — refusing to install unverified (set SMITH_ALLOW_UNVERIFIED=1 to override)" >&2
+    exit 1
+  fi
+  install -m 0755 "$tmp/smith-$plat" "$dest"
 
-# Migrate a machine coming from the retired v1 (personal-index) layout: back up
-# ~/.toolsmith cruft and strip dead config keys. No-op on a clean/first install.
-"$dest" migrate || true
+  # The skill is agent-loaded, so it gets the same treatment: verified against
+  # SHA256SUMS when present, and only reported as installed if it actually was.
+  if [ "$got_skill" = 1 ]; then
+    if [ "$got_sums" = 1 ]; then
+      verify_checksum "$tmp/cli-creator-SKILL.md" "$tmp/SHA256SUMS" "cli-creator-SKILL.md" || exit 1
+    fi
+    install -m 0644 "$tmp/cli-creator-SKILL.md" "$skill_dst"
+    skill_installed=1
+  fi
+}
 
-case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
-  *) echo "note: $INSTALL_DIR is not on your PATH — add: export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
-esac
-command -v mise >/dev/null 2>&1 || \
-  echo "note: mise not found — smith needs it to run (https://mise.jdx.dev)"
-echo "next: run \`smith use <repo>\` in a project to adopt a tool; see the README 'Using smith with agents' for the agent workflow + trust rules."
+main() {
+  detect_platform
+  mkdir -p "$INSTALL_DIR"
+  dest="$INSTALL_DIR/smith"
+  skill_dst="$SKILLS_DIR/cli-creator/SKILL.md"
+  mkdir -p "$SKILLS_DIR/cli-creator"
+  skill_installed=0
+
+  if [ -f "cmd/smith/main.go" ]; then
+    build_from_source
+  else
+    download_release
+  fi
+
+  chmod +x "$dest"
+  # A wrong-arch or truncated binary must fail the install loudly, not silently
+  # print "(?)" and exit 0.
+  if ! ver="$("$dest" version 2>/dev/null)"; then
+    echo "smith: installed binary at $dest does not run (wrong arch or corrupt download)" >&2
+    rm -f "$dest"
+    exit 1
+  fi
+  echo "installed: $dest ($ver)"
+  [ "$skill_installed" = 1 ] && echo "installed skill: $skill_dst"
+
+  # Migrate a machine coming from the retired v1 (personal-index) layout: back up
+  # ~/.toolsmith cruft and strip dead config keys. No-op on a clean/first install.
+  "$dest" migrate || true
+
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *) echo "note: $INSTALL_DIR is not on your PATH — add: export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
+  esac
+  command -v mise >/dev/null 2>&1 || \
+    echo "note: mise not found — smith needs it to run (https://mise.jdx.dev)"
+  echo "next: run \`smith use <repo>\` in a project to adopt a tool; see the README 'Using smith with agents' for the agent workflow + trust rules."
+}
+
+# Call main only after the whole script has parsed, so a connection dropped
+# mid-`curl … | sh` executes nothing rather than a truncated prefix.
+main "$@"

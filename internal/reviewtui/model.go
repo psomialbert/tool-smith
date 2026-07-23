@@ -84,8 +84,16 @@ func (m *Model) Sel() (int, int) {
 	return c, a
 }
 
+// hasFiles reports whether there's a current file to act on. The CLI refuses an
+// empty bundle before entering the TUI, but the mutators guard on this so a
+// stray keypress can never index empty per-file slices.
+func (m *Model) hasFiles() bool { return len(m.Files) > 0 }
+
 // scrollTo keeps the cursor within the visible window of viewRows.
 func (m *Model) scrollTo(viewRows int) {
+	if !m.hasFiles() {
+		return
+	}
 	if viewRows < 1 {
 		viewRows = 1
 	}
@@ -105,20 +113,41 @@ func (m *Model) scrollTo(viewRows int) {
 }
 
 func (m *Model) Move(delta, viewRows int) {
+	if !m.hasFiles() {
+		return
+	}
 	m.cursor[m.cur] = clamp(m.cursor[m.cur]+delta, 0, m.lineCount()-1)
 	m.scrollTo(viewRows)
 }
 
 func (m *Model) Page(pages, viewRows int) { m.Move(pages*viewRows, viewRows) }
 
-func (m *Model) ToStart(viewRows int) { m.cursor[m.cur] = 0; m.scrollTo(viewRows) }
-func (m *Model) ToEnd(viewRows int)   { m.cursor[m.cur] = m.lineCount() - 1; m.scrollTo(viewRows) }
+func (m *Model) ToStart(viewRows int) {
+	if !m.hasFiles() {
+		return
+	}
+	m.cursor[m.cur] = 0
+	m.scrollTo(viewRows)
+}
+func (m *Model) ToEnd(viewRows int) {
+	if !m.hasFiles() {
+		return
+	}
+	m.cursor[m.cur] = m.lineCount() - 1
+	m.scrollTo(viewRows)
+}
 
 func (m *Model) NextFile(viewRows int) {
+	if !m.hasFiles() {
+		return
+	}
 	m.cur = clamp(m.cur+1, 0, len(m.Files)-1)
 	m.scrollTo(viewRows)
 }
 func (m *Model) PrevFile(viewRows int) {
+	if !m.hasFiles() {
+		return
+	}
 	m.cur = clamp(m.cur-1, 0, len(m.Files)-1)
 	m.scrollTo(viewRows)
 }
@@ -127,6 +156,9 @@ func (m *Model) PrevFile(viewRows int) {
 func (m *Model) Selecting() bool { return m.anchor[m.cur] >= 0 }
 
 func (m *Model) ToggleSelect() {
+	if !m.hasFiles() {
+		return
+	}
 	if m.anchor[m.cur] < 0 {
 		m.anchor[m.cur] = m.cursor[m.cur]
 	} else {
@@ -161,11 +193,15 @@ func (m *Model) CommitComment() {
 	text := strings.TrimSpace(m.Input)
 	m.Mode = ModeNormal
 	m.Input = ""
-	if text == "" {
+	if text == "" || !m.hasFiles() {
 		return // empty comment discarded
 	}
-	lo, hi := m.Sel()
 	f := m.Files[m.cur]
+	if len(f.Lines) == 0 {
+		m.anchor[m.cur] = -1
+		return
+	}
+	lo, hi := m.Sel()
 	snippet := append([]string(nil), f.Lines[lo:hi+1]...)
 	m.Comments = append(m.Comments, Comment{
 		File: f.Name, Start: lo + 1, End: hi + 1, Text: text, Snippet: snippet,

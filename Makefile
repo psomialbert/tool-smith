@@ -37,6 +37,7 @@ uninstall:
 	@rm -rf "$(SKILLS_DIR)/cli-creator" && echo "removed $(SKILLS_DIR)/cli-creator"
 
 cross:
+	@rm -rf dist
 	@mkdir -p dist
 	@for p in $(PLATFORMS); do \
 	  os=$${p%-*}; arch=$${p#*-}; \

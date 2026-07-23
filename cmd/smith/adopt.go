@@ -495,11 +495,14 @@ type adoptResult struct{ Name, Version, Sha256, Dst string }
 
 // manifestPerms maps a tool's declared sandbox capabilities (manifest
 // `sandbox:`) to runtime Perms, expanding a leading ~ to $HOME and making write
-// paths absolute. nil manifest.Sandbox = the strict default.
-func manifestPerms(m scaffold.Manifest) sandbox.Perms {
+// paths absolute. nil manifest.Sandbox = the strict default. It returns an error
+// if a declared write grant targets a path too dangerous to hand to an
+// unreviewed self-test (the manifest is attacker-controlled and its selftest.sh
+// runs under these grants before any human reviews the code).
+func manifestPerms(m scaffold.Manifest) (sandbox.Perms, error) {
 	var perms sandbox.Perms
 	if m.Sandbox == nil {
-		return perms
+		return perms, nil
 	}
 	perms.Network = m.Sandbox.Network
 	home, _ := os.UserHomeDir()
@@ -508,15 +511,56 @@ func manifestPerms(m scaffold.Manifest) sandbox.Perms {
 		if w == "" {
 			continue
 		}
-		if strings.HasPrefix(w, "~/") && home != "" {
-			w = filepath.Join(home, w[2:])
+		// Expand a leading ~ (bare "~" or "~/...") to $HOME; anything else is
+		// taken literally. Previously only "~/" expanded, so a bare "~" silently
+		// became a CWD-relative "./~" grant.
+		if home != "" && (w == "~" || strings.HasPrefix(w, "~/")) {
+			w = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(w, "~"), "/"))
 		}
-		if abs, err := filepath.Abs(w); err == nil {
-			w = abs
+		abs, err := filepath.Abs(w)
+		if err != nil {
+			return sandbox.Perms{}, fmt.Errorf("sandbox write path %q: %w", w, err)
 		}
-		perms.WritePaths = append(perms.WritePaths, w)
+		abs = filepath.Clean(abs)
+		if reason := forbiddenWriteGrant(abs, home); reason != "" {
+			return sandbox.Perms{}, fmt.Errorf("refusing sandbox write grant %q: %s — an unreviewed self-test must not be handed write access there", abs, reason)
+		}
+		perms.WritePaths = append(perms.WritePaths, abs)
 	}
-	return perms
+	return perms, nil
+}
+
+// forbiddenWriteGrant reports why abs is too dangerous to grant an unreviewed
+// self-test write access to (empty string = allowed). It blocks the filesystem
+// root, system directories, the home directory (and any parent of it), and
+// well-known credential/secret stores — the paths a hostile manifest would name
+// to persist or exfiltrate. A tool's own scratch needs are already covered by
+// the always-granted CWD + TMP; a grant beyond those to these locations has no
+// legitimate self-test use.
+func forbiddenWriteGrant(abs, home string) string {
+	if abs == "/" {
+		return "the filesystem root"
+	}
+	for _, d := range []string{"/etc", "/private/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib64", "/System", "/Library"} {
+		if abs == d || strings.HasPrefix(abs, d+"/") {
+			return "a system directory (" + d + ")"
+		}
+	}
+	if home != "" {
+		if abs == home {
+			return "the home directory"
+		}
+		if strings.HasPrefix(home, abs+string(filepath.Separator)) {
+			return "a parent of the home directory"
+		}
+		for _, sub := range []string{".ssh", ".aws", ".gnupg", ".kube", ".docker"} {
+			p := filepath.Join(home, sub)
+			if abs == p || strings.HasPrefix(abs, p+string(filepath.Separator)) {
+				return "a credential store (~/" + sub + ")"
+			}
+		}
+	}
+	return ""
 }
 
 // capabilitySummary renders granted capabilities for surfacing; "" if none.
@@ -547,7 +591,10 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (a
 		return adoptResult{}, err
 	}
 	if version != "" {
-		co := exec.Command("git", "-C", clone, "checkout", "--quiet", version)
+		// `--end-of-options` stops flag parsing while keeping version in ref
+		// position (a bare `--` would switch git to pathspec mode), so a ref
+		// beginning with "-" can't be read as a git flag.
+		co := exec.Command("git", "-C", clone, "checkout", "--quiet", "--end-of-options", version)
 		co.Stdout, co.Stderr = os.Stderr, os.Stderr
 		if err := co.Run(); err != nil {
 			return adoptResult{}, fmt.Errorf("checkout %s: %w", version, err)
@@ -601,7 +648,10 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (a
 	// at adopt time; a failing self-test blocks adoption. The tool's declared
 	// capabilities (manifest `sandbox:`) are surfaced for the reviewer and are
 	// the grants the self-test runs with — everything else stays denied.
-	perms := manifestPerms(m)
+	perms, err := manifestPerms(m)
+	if err != nil {
+		return adoptResult{}, fmt.Errorf("%s@%s — not adopted: %w", m.Name, version, err)
+	}
 	if summary := capabilitySummary(perms); summary != "" {
 		fmt.Fprintf(os.Stderr, "[smith] ⚠ %s@%s requests capabilities: %s\n", m.Name, version, summary)
 		fmt.Fprintln(os.Stderr, "[smith]   these are granted during the self-test — scrutinize them when you review the adoption")
@@ -644,6 +694,12 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (a
 	lock, err := loadProjLock()
 	if err != nil {
 		return adoptResult{}, err
+	}
+	// Refuse to silently replace a same-named pin from a different source (the
+	// mise path guards this too): two tools that derive the same name can't
+	// coexist, and overwriting would leave PATH order to decide which runs.
+	if existing, ok := lock.Tools[m.Name]; ok && existing.Source != clonedURL {
+		return adoptResult{}, fmt.Errorf("adopting %q from %s would overwrite the existing pin from %s (same name, different source); remove the old one first", m.Name, clonedURL, existing.Source)
 	}
 	lock.Tools[m.Name] = ProjTool{
 		Source: clonedURL, Version: version, Sha256: sum,
@@ -746,12 +802,14 @@ func cmdInstall(p config.Paths, args []string) error {
 			return err
 		}
 	}
-	// External (mise) tools are pinned in mise.toml; fetch them via mise.
+	// External (mise) tools are pinned in mise.toml; fetch them via mise. A
+	// failure here means a pinned external CLI is absent from PATH, so fail
+	// closed — otherwise CI/teammates get exit 0 with a missing tool.
 	if miseTools {
 		mi := exec.Command("mise", "install")
 		mi.Stdout, mi.Stderr = os.Stderr, os.Stderr
 		if err := mi.Run(); err != nil {
-			fmt.Fprintln(os.Stderr, "[smith] note: `mise install` failed; run it in this dir")
+			return fmt.Errorf("`mise install` failed (external tools not fetched): %w", err)
 		}
 	}
 	if err := ensureActivation(".", absBinEarly); err != nil {
@@ -759,14 +817,21 @@ func cmdInstall(p config.Paths, args []string) error {
 	}
 	// .smith/bin is generated; keep it out of the repo (the vendored source
 	// and lockfile are what's committed/reviewed).
-	ensureProjectGitignore()
+	if err := ensureProjectGitignore(); err != nil {
+		return fmt.Errorf("updating .gitignore: %w", err)
+	}
 	if err := exec.Command("mise", "trust").Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "[smith] note: `mise trust` failed; run it in this dir")
 	}
 
 	// Adopted tools are trusted for this project, so export their SKILL.md so
-	// agent sessions discover them (config skills.export: always|never).
-	fc, _ := p.LoadFileConfig()
+	// agent sessions discover them (config skills.export: always|never). Fail
+	// closed on a corrupt config: a zero-value config would silently default to
+	// exporting, defeating an operator's `export: never`.
+	fc, ferr := p.LoadFileConfig()
+	if ferr != nil {
+		return fmt.Errorf("reading %s (fix or remove it): %w", filepath.Join(p.Home, "config.yaml"), ferr)
+	}
 	if fc.Skills.Export != "never" {
 		for _, name := range names {
 			src := filepath.Join(smithDir, "tools", name, "SKILL.md")
@@ -819,10 +884,10 @@ func gitignoreMissing() []string {
 	return missing
 }
 
-func ensureProjectGitignore() {
+func ensureProjectGitignore() error {
 	missing := gitignoreMissing()
 	if len(missing) == 0 {
-		return
+		return nil
 	}
 	raw, _ := os.ReadFile(".gitignore")
 	content := string(raw)
@@ -832,7 +897,7 @@ func ensureProjectGitignore() {
 		}
 		content += want + "\n"
 	}
-	_ = os.WriteFile(".gitignore", []byte(content), 0o644)
+	return os.WriteFile(".gitignore", []byte(content), 0o644)
 }
 
 // ---------------------------------------------------------------- smith search

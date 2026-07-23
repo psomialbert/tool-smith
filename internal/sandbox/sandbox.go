@@ -189,8 +189,13 @@ func resolveSymlinks(p string) string {
 
 // Command returns the full argv that runs `argv` sandboxed under perms, with
 // writes confined to workDir (empty = current dir) and TMP, or an error if no
-// sandbox mechanism exists on this machine.
-func Command(profilesDir, workDir string, perms Perms, argv []string) ([]string, error) {
+// sandbox mechanism exists on this machine. roPaths are made readable inside the
+// sandbox even when they'd otherwise be masked — on Linux the `--tmpfs /tmp`
+// overlay hides anything under /tmp (where the cloned tool repo lives on a
+// default box), so a self-test reading its own script from there would ENOENT
+// unless the clone dir is re-bound read-only. On macOS reads are unrestricted,
+// so roPaths is a no-op there.
+func Command(profilesDir, workDir string, perms Perms, argv []string, roPaths ...string) ([]string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("sandbox-exec"); err != nil {
@@ -239,6 +244,14 @@ func Command(profilesDir, workDir string, perms Perms, argv []string) ([]string,
 			"--dir", linuxScratchHome,
 			"--bind", cwd, cwd,
 			"--die-with-parent",
+		}
+		// Re-bind read-only paths AFTER the tmpfs so a clone under /tmp stays
+		// readable (the tmpfs would otherwise mask it).
+		for _, ro := range roPaths {
+			if ro == "" {
+				continue
+			}
+			out = append(out, "--ro-bind", ro, ro)
 		}
 		for _, w := range perms.sortedWritePaths() {
 			out = append(out, "--bind", w, w) // rw bind for a granted write path

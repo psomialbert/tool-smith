@@ -90,9 +90,15 @@ func applyV1Migrate(p config.Paths) (moved []string, dropped []string, backup st
 			return
 		}
 		for _, name := range present {
+			// Never clobber an existing backup — a same-day re-run (e.g. via
+			// `smith doctor --fix`) must not destroy a copy the user may have
+			// restored from. Pick the first free "<name>", "<name>.1", ... slot.
 			dst := filepath.Join(backup, name)
-			if err = os.RemoveAll(dst); err != nil { // idempotent re-run
-				return
+			for i := 1; ; i++ {
+				if _, statErr := os.Lstat(dst); os.IsNotExist(statErr) {
+					break
+				}
+				dst = filepath.Join(backup, fmt.Sprintf("%s.%d", name, i))
 			}
 			if err = os.Rename(filepath.Join(p.Home, name), dst); err != nil {
 				err = fmt.Errorf("backing up %s: %w", name, err)
