@@ -50,7 +50,15 @@ func semverLess(a, b string) bool {
 // latestTag returns the highest vX.Y.Z semver tag advertised by the remote (or
 // local repo path). Pre-release / non-semver tags are ignored.
 func latestTag(clonedURL string) (string, error) {
-	out, err := exec.Command("git", "ls-remote", "--tags", clonedURL).Output()
+	// The source comes from the (hand-editable) lockfile and is handed straight
+	// to git. Validate it exactly like `smith use` does before cloning: an
+	// "ext::"/"fd::" remote-helper transport or a leading-"-" source would
+	// execute an arbitrary command on the host here, before any sandbox. The
+	// `--end-of-options` guard keeps a "-"-prefixed source out of flag position.
+	if err := validCloneURL(clonedURL); err != nil {
+		return "", err
+	}
+	out, err := exec.Command("git", "ls-remote", "--tags", "--end-of-options", clonedURL).Output()
 	if err != nil {
 		return "", fmt.Errorf("listing tags for %s: %w", clonedURL, err)
 	}
@@ -130,11 +138,23 @@ func cmdUpgrade(p config.Paths, args []string) error {
 		t := lock.Tools[name]
 		if t.isMise() {
 			// External tool: pinned in mise.toml, no vendored source to re-clone.
-			// Skip it in the bulk sweep; if explicitly targeted, say how.
+			// In the bulk sweep, skip it (say how to upgrade it). When explicitly
+			// targeted, re-pin it via the same path as `smith use --mise` so the
+			// recorded version doesn't drift stale from mise.toml.
 			if targetName != "" {
-				return fmt.Errorf("%q is an external (mise) tool — upgrade it with `mise use %s@<ver>`, then `smith install`", name, strings.TrimPrefix(t.Source, "mise:"))
+				spec := strings.TrimPrefix(t.Source, "mise:")
+				if err := cmdUseMise(p, spec, targetVer); err != nil {
+					return err
+				}
+				return nil
 			}
 			skippedExternal = append(skippedExternal, name)
+			continue
+		}
+		// Check org policy BEFORE any network contact: a blocked source must not
+		// be reached via `git ls-remote` (latestTag) just to be rejected after.
+		if len(pats) > 0 && !allowlistPermits(pats, t.Source, t.Source) {
+			failed = append(failed, failEntry{name, "blocked by allowlist"})
 			continue
 		}
 		want := targetVer
@@ -148,10 +168,6 @@ func cmdUpgrade(p config.Paths, args []string) error {
 		}
 		if want == t.Version {
 			uptodate = append(uptodate, name)
-			continue
-		}
-		if len(pats) > 0 && !allowlistPermits(pats, t.Source, t.Source) {
-			failed = append(failed, failEntry{name, "blocked by allowlist"})
 			continue
 		}
 		// adoptAtVersion only writes the pin on success, so a failed self-test
@@ -293,8 +309,15 @@ func cmdDiff(p config.Paths, args []string) error {
 	}
 	gitArgs = append(gitArgs, vendored, target)
 	// `git diff --no-index` exits 1 when there are differences — that's not an
-	// error for us, and stdout still carries the diff.
-	out, _ := exec.Command("git", gitArgs...).Output()
+	// error for us, and stdout still carries the diff. But exit ≥2 (or a failure
+	// to start git) is a genuine error: distinguish it so a broken diff doesn't
+	// masquerade as a clean "no source changes" all-clear.
+	out, derr := exec.Command("git", gitArgs...).Output()
+	if derr != nil {
+		if ee, ok := derr.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+			return fmt.Errorf("git diff failed: %w", derr)
+		}
+	}
 	if *asJSON {
 		return diffNumstatJSON(string(out), name, t.Version, ver)
 	}

@@ -10,6 +10,23 @@ import (
 	"smith/internal/scaffold"
 )
 
+func TestGitHubSlugFromURL(t *testing.T) {
+	cases := map[string]string{
+		"git@github.com:acme/greet.git":       "acme/greet",
+		"https://github.com/acme/greet.git":   "acme/greet",
+		"https://github.com/acme/greet":       "acme/greet",
+		"ssh://git@github.com/acme/greet.git": "acme/greet",
+		"git@mygithub.company.com:acme/x.git": "", // look-alike host: not github.com
+		"https://github.company.com/acme/x":   "", // "github.com" not at a host boundary
+		"https://gitlab.com/acme/greet.git":   "",
+	}
+	for url, want := range cases {
+		if got := gitHubSlugFromURL(url); got != want {
+			t.Errorf("gitHubSlugFromURL(%q) = %q, want %q", url, got, want)
+		}
+	}
+}
+
 func TestPublishValidate(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "greet")
 	if err := scaffold.Create(dir, scaffold.Manifest{

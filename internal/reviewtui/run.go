@@ -145,7 +145,9 @@ func handleComment(m *Model, k Key) {
 }
 
 // draw repaints the frame: home the cursor, then write each line clearing to
-// end-of-line so shorter frames don't leave stale text.
+// end-of-line so shorter frames don't leave stale text, then clear to
+// end-of-screen so a shrunk frame (e.g. after a SIGWINCH that reduced the row
+// count) doesn't leave the previous taller frame's bottom rows lingering.
 func draw(out io.Writer, frame []string) {
 	var b []byte
 	b = append(b, "\x1b[H"...)
@@ -156,6 +158,7 @@ func draw(out io.Writer, frame []string) {
 			b = append(b, "\r\n"...)
 		}
 	}
+	b = append(b, "\x1b[J"...) // erase anything below the frame
 	out.Write(b)
 }
 

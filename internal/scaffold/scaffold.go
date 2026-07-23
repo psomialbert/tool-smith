@@ -92,6 +92,13 @@ func Create(dir string, m Manifest) error {
 	if !ok {
 		return fmt.Errorf("unknown runtime %q (have: %s)", m.Runtime, strings.Join(Runtimes, ", "))
 	}
+	// The name is joined into filesystem paths (the draft dir and, once adopted,
+	// the vendored-tool + skill dirs), so enforce the same identifier rule the
+	// adoption boundary uses here too — don't rely on the existence check below
+	// to be the only thing standing between a bad name and a bad path.
+	if !ValidToolName(m.Name) {
+		return fmt.Errorf("tool name %q must be a plain identifier ([A-Za-z0-9._-], starting alphanumeric, no path separators)", m.Name)
+	}
 	if _, err := os.Stat(dir); err == nil {
 		return fmt.Errorf("draft already exists: %s (edit it, or remove it to start over)", dir)
 	}

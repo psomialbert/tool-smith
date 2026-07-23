@@ -8,7 +8,7 @@ CLI adopted into a project behind a trust gate.
 ## Adopt it
 
 ```sh
-smith use <owner>/{{NAME}}@{{VERSION}}   # sandboxed self-test, vendored, pinned
+smith use <owner>/{{NAME}}@v{{VERSION}}  # sandboxed self-test, vendored, pinned
 smith install                            # onto the project's PATH
 {{NAME}} --help
 ```

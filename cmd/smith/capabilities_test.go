@@ -51,7 +51,17 @@ func TestManifestPermsMapping(t *testing.T) {
 
 func TestManifestPermsRejectsDangerousGrants(t *testing.T) {
 	home, _ := os.UserHomeDir()
-	bad := []string{"/", "/etc", "/etc/cron.d", "~", "~/", "~/.ssh", "~/.ssh/authorized_keys", "~/.aws", home}
+	bad := []string{
+		"/", "/etc", "/etc/cron.d", "~", "~/", "~/.ssh", "~/.ssh/authorized_keys", "~/.aws", home,
+		// Relative grants resolve into the project, not the self-test scratch
+		// dir: the .git/hooks persistence escape and its cousins.
+		".git/hooks", ".", "..", "../evil", "subdir",
+		// Hidden files/dirs directly under $HOME: shell rc + config +
+		// skill-injection persistence surface.
+		"~/.zshrc", "~/.bashrc", "~/.profile", "~/.config", "~/.claude", "~/.gitconfig",
+		// macOS launch agents.
+		"~/Library/LaunchAgents", "~/Library/LaunchAgents/x.plist",
+	}
 	for _, w := range bad {
 		if w == "" {
 			continue
@@ -61,7 +71,8 @@ func TestManifestPermsRejectsDangerousGrants(t *testing.T) {
 			t.Fatalf("write grant %q must be refused", w)
 		}
 	}
-	// A benign grant beyond CWD/TMP is still allowed.
+	// A benign grant beyond CWD/TMP (a named subpath, not a hidden entry
+	// directly under $HOME) is still allowed.
 	if _, err := manifestPerms(scaffold.Manifest{Sandbox: &scaffold.SandboxSpec{Write: []string{"~/.cache/tool"}}}); err != nil {
 		t.Fatalf("benign grant rejected: %v", err)
 	}

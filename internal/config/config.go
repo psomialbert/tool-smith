@@ -26,6 +26,12 @@ func Resolve() (Paths, error) {
 			return Paths{}, fmt.Errorf("resolving home dir: %w", err)
 		}
 		home = filepath.Join(userHome, ".toolsmith")
+	} else if home == "~" || strings.HasPrefix(home, "~/") {
+		// Expand a leading ~ so `SMITH_HOME=~/x` resolves under $HOME, not to a
+		// literal "./~/x" (SkillsDir already expands ~; keep Resolve consistent).
+		if userHome, err := os.UserHomeDir(); err == nil {
+			home = filepath.Join(userHome, strings.TrimPrefix(strings.TrimPrefix(home, "~"), "/"))
+		}
 	}
 	abs, err := filepath.Abs(home)
 	if err != nil {

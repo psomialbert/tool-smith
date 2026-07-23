@@ -38,6 +38,27 @@ func TestAllowlistPermits(t *testing.T) {
 	}
 }
 
+// A bare-shorthand pattern like "acme/*" must permit a source consistently
+// whether the check runs against the shorthand (`smith use acme/greet`) or the
+// expanded/stored URL (`smith upgrade`, which only has the lockfile URL). The
+// two paths disagreeing is a real trap: use succeeds, upgrade is blocked forever.
+func TestAllowlistPermitsUseUpgradeConsistency(t *testing.T) {
+	pats := []string{"acme/*"}
+	expanded := "https://github.com/acme/greet"
+	// smith use: raw shorthand + expanded URL.
+	if !allowlistPermits(pats, "acme/greet", expanded) {
+		t.Fatal("use path (raw shorthand) should be permitted by acme/*")
+	}
+	// smith upgrade: only the stored expanded URL is available.
+	if !allowlistPermits(pats, expanded, expanded) {
+		t.Fatal("upgrade path (expanded URL only) must also be permitted by acme/* — else use/upgrade disagree")
+	}
+	// A different owner must still be denied on both paths.
+	if allowlistPermits(pats, "https://github.com/evil/x", "https://github.com/evil/x") {
+		t.Fatal("acme/* must not permit evil/x")
+	}
+}
+
 func TestUseRefusedByAllowlist(t *testing.T) {
 	requireSandbox(t)
 	if _, err := exec.LookPath("git"); err != nil {

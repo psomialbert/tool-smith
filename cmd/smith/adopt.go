@@ -83,7 +83,26 @@ func saveProjLock(l ProjLock) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(lockPath(), raw, 0o644)
+	// Write to a temp file in the same dir, then rename over the target: a
+	// crash or a concurrent writer can't leave a half-written (torn) tools.yaml,
+	// and the rename is atomic within the directory.
+	tmp, err := os.CreateTemp(smithDir, ".tools.yaml.*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, lockPath())
 }
 
 // metaParts are the non-source bundle files every tool carries.
@@ -166,9 +185,15 @@ func uvLockScript(dir, scriptRel string) error {
 // deps, in a NETWORK-allowed sandbox with a sanitized env and writes confined
 // to workdir — so dep download/build can't reach secrets. cacheAbs must sit
 // under workdir (the sandbox's writable CWD).
+//
+// It uses `uv sync --script` (resolve + install the script's locked
+// dependencies) rather than `uv run --script`: the network is granted here for
+// dep fetching, and `uv run` would EXECUTE the untrusted tool's code with that
+// network access before the self-test gate — an exfiltration channel at adopt
+// time. `uv sync` populates the same cache without running the script.
 func warmUVCache(p config.Paths, workdir, scriptAbs, cacheAbs string) error {
 	argv, err := sandbox.Command(p.SandboxProfiles, workdir, sandbox.Perms{Network: true},
-		[]string{"uv", "run", "--script", scriptAbs, "--version"})
+		[]string{"uv", "sync", "--script", scriptAbs})
 	if err != nil {
 		return err
 	}
@@ -258,27 +283,36 @@ func gitClone(url, dir string) error {
 // not in expected. A vendored tool dir holds exactly its pinned source files;
 // anything else (e.g. a requests.py dropped next to a python entrypoint) is
 // invisible to the bundle hash yet can hijack execution, so it is drift.
-func unexpectedFiles(dir string, expected []string) []string {
+func unexpectedFiles(dir string, expected []string) ([]string, error) {
 	want := make(map[string]bool, len(expected))
 	for _, f := range expected {
 		want[filepath.ToSlash(f)] = true
 	}
 	var extra []string
-	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	// Fail closed on a walk error (e.g. an unreadable subdir): returning the
+	// error rather than swallowing it prevents an un-pinned file from hiding
+	// behind a directory the integrity check couldn't traverse.
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
 			return nil
 		}
 		rel, rerr := filepath.Rel(dir, p)
 		if rerr != nil {
-			return nil
+			return rerr
 		}
 		if !want[filepath.ToSlash(rel)] {
 			extra = append(extra, filepath.ToSlash(rel))
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	sort.Strings(extra)
-	return extra
+	return extra, nil
 }
 
 // allowlistPatterns returns the org's permitted-source patterns: config
@@ -321,9 +355,17 @@ func allowlistPermits(pats []string, source, expanded string) bool {
 		c = strings.TrimSuffix(c, ".git")
 		cands[c] = true
 		if i := strings.Index(c, "://"); i >= 0 {
-			cands[c[i+3:]] = true
+			c = c[i+3:]
+			cands[c] = true
 		}
-		cands[strings.TrimPrefix(c, "github:")] = true
+		c = strings.TrimPrefix(c, "github:")
+		cands[c] = true
+		// Also expose the bare owner/repo of a github.com source, so a pattern
+		// like "acme/*" matches whether the check runs against the shorthand
+		// ("acme/greet", via `smith use`) or the expanded/stored URL
+		// ("github.com/acme/greet", via `smith upgrade`). Without this the two
+		// paths disagree: a source `smith use` accepts, `smith upgrade` blocks.
+		cands[strings.TrimPrefix(c, "github.com/")] = true
 	}
 	for _, p := range pats {
 		for c := range cands {
@@ -445,13 +487,10 @@ func cmdUseMise(p config.Paths, spec, version string) error {
 		}
 	}
 
-	// mise writes the pin into mise.toml (committed project config) + installs it.
-	mu := exec.Command("mise", "use", spec+"@"+version)
-	mu.Stdout, mu.Stderr = os.Stderr, os.Stderr
-	if err := mu.Run(); err != nil {
-		return fmt.Errorf("mise use %s@%s: %w", spec, version, err)
-	}
-
+	// Check the name-collision BEFORE mutating anything: `mise use` writes the
+	// pin into mise.toml (committed) and installs the binary onto PATH, so a
+	// collision caught only afterwards would still leave a refused adoption
+	// pinned and on PATH — the exact ambiguity this guard exists to prevent.
 	lock, err := loadProjLock()
 	if err != nil {
 		return err
@@ -462,6 +501,14 @@ func cmdUseMise(p config.Paths, spec, version string) error {
 		return fmt.Errorf("adopting %q would overwrite the existing pin %q (both derive the name %q); they can't coexist in this project",
 			spec, existing.Source, name)
 	}
+
+	// mise writes the pin into mise.toml (committed project config) + installs it.
+	mu := exec.Command("mise", "use", spec+"@"+version)
+	mu.Stdout, mu.Stderr = os.Stderr, os.Stderr
+	if err := mu.Run(); err != nil {
+		return fmt.Errorf("mise use %s@%s: %w", spec, version, err)
+	}
+
 	lock.Tools[name] = ProjTool{Source: newSource, Version: version, Runtime: "mise"}
 	if err := saveProjLock(lock); err != nil {
 		return err
@@ -517,11 +564,16 @@ func manifestPerms(m scaffold.Manifest) (sandbox.Perms, error) {
 		if home != "" && (w == "~" || strings.HasPrefix(w, "~/")) {
 			w = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(w, "~"), "/"))
 		}
-		abs, err := filepath.Abs(w)
-		if err != nil {
-			return sandbox.Perms{}, fmt.Errorf("sandbox write path %q: %w", w, err)
+		// A write grant must be an absolute path (after ~ expansion). A relative
+		// grant resolves against smith's CWD — the project root — not the
+		// self-test's scratch workdir, so ".git/hooks" or "." would hand an
+		// unreviewed self-test write access to the project repo (e.g. to install
+		// a git hook that later runs unsandboxed). A relative path has no stable
+		// meaning for a self-test that runs from an ephemeral scratch dir anyway.
+		if !filepath.IsAbs(w) {
+			return sandbox.Perms{}, fmt.Errorf("refusing relative sandbox write grant %q: declare an absolute path (or a ~-path); a relative grant resolves into the project and can't be handed to an unreviewed self-test", w)
 		}
-		abs = filepath.Clean(abs)
+		abs := filepath.Clean(w)
 		if reason := forbiddenWriteGrant(abs, home); reason != "" {
 			return sandbox.Perms{}, fmt.Errorf("refusing sandbox write grant %q: %s — an unreviewed self-test must not be handed write access there", abs, reason)
 		}
@@ -532,11 +584,13 @@ func manifestPerms(m scaffold.Manifest) (sandbox.Perms, error) {
 
 // forbiddenWriteGrant reports why abs is too dangerous to grant an unreviewed
 // self-test write access to (empty string = allowed). It blocks the filesystem
-// root, system directories, the home directory (and any parent of it), and
-// well-known credential/secret stores — the paths a hostile manifest would name
-// to persist or exfiltrate. A tool's own scratch needs are already covered by
-// the always-granted CWD + TMP; a grant beyond those to these locations has no
-// legitimate self-test use.
+// root, system directories, the home directory (and any parent of it),
+// credential/secret stores, the project working tree, hidden dotfiles/dotdirs
+// directly under $HOME (shell rc files, ~/.config, ~/.claude, ~/.gitconfig — the
+// persistence surface), and the macOS launch-agent dirs — the paths a hostile
+// manifest would name to persist or exfiltrate. A tool's own scratch needs are
+// already covered by the always-granted CWD + TMP; a grant beyond those to these
+// locations has no legitimate self-test use. abs is assumed absolute + cleaned.
 func forbiddenWriteGrant(abs, home string) string {
 	if abs == "/" {
 		return "the filesystem root"
@@ -544,6 +598,14 @@ func forbiddenWriteGrant(abs, home string) string {
 	for _, d := range []string{"/etc", "/private/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib64", "/System", "/Library"} {
 		if abs == d || strings.HasPrefix(abs, d+"/") {
 			return "a system directory (" + d + ")"
+		}
+	}
+	// The project working tree: the self-test runs from an ephemeral scratch
+	// workdir, never the project, so a grant into the project (its .git, its
+	// source) exists only to tamper with the repo before a human reviews it.
+	if cwd, err := os.Getwd(); err == nil {
+		if c := filepath.Clean(cwd); abs == c || strings.HasPrefix(abs, c+string(filepath.Separator)) {
+			return "the project working tree"
 		}
 	}
 	if home != "" {
@@ -557,6 +619,20 @@ func forbiddenWriteGrant(abs, home string) string {
 			p := filepath.Join(home, sub)
 			if abs == p || strings.HasPrefix(abs, p+string(filepath.Separator)) {
 				return "a credential store (~/" + sub + ")"
+			}
+		}
+		// A hidden entry directly under $HOME — shell rc files (~/.zshrc,
+		// ~/.bashrc, ~/.profile), ~/.config, ~/.claude, ~/.gitconfig — is a
+		// persistence/skill-injection surface. Require a named subpath instead
+		// (e.g. ~/.cache/mytool), which has a non-hidden ancestor under home.
+		if filepath.Dir(abs) == home && strings.HasPrefix(filepath.Base(abs), ".") {
+			return "a hidden file/dir directly under $HOME (persistence surface)"
+		}
+		// macOS launch agents/daemons: dropping a plist here persists code.
+		for _, sub := range []string{"Library/LaunchAgents", "Library/LaunchDaemons"} {
+			p := filepath.Join(home, sub)
+			if abs == p || strings.HasPrefix(abs, p+string(filepath.Separator)) {
+				return "a macOS launch-agent directory (~/" + sub + ")"
 			}
 		}
 	}
@@ -600,8 +676,13 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (a
 			return adoptResult{}, fmt.Errorf("checkout %s: %w", version, err)
 		}
 	} else {
-		out, _ := exec.Command("git", "-C", clone, "describe", "--tags", "--always").Output()
+		out, derr := exec.Command("git", "-C", clone, "describe", "--tags", "--always").Output()
 		version = strings.TrimSpace(string(out))
+		if derr != nil || version == "" {
+			// Don't pin an empty version (which would print "adopted name@" and
+			// break later upgrade/diff messaging): require an explicit @version.
+			return adoptResult{}, fmt.Errorf("could not determine a version for %s (git describe failed) — pin an explicit @<version>", displaySource)
+		}
 	}
 
 	m, err := scaffold.LoadManifest(clone)
@@ -661,6 +742,19 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (a
 		return adoptResult{}, fmt.Errorf("self-test FAILED — not adopted: %w", err)
 	}
 
+	// Refuse to silently replace a same-named pin from a different source BEFORE
+	// touching the vendored tree: two tools that derive the same name can't
+	// coexist, and overwriting would leave PATH order to decide which runs.
+	// Checking after RemoveAll would wipe the existing vendored dir even on the
+	// refused path, leaving the lockfile pointing at a now-clobbered tree.
+	lock, err := loadProjLock()
+	if err != nil {
+		return adoptResult{}, err
+	}
+	if existing, ok := lock.Tools[m.Name]; ok && existing.Source != clonedURL {
+		return adoptResult{}, fmt.Errorf("adopting %q from %s would overwrite the existing pin from %s (same name, different source); remove the old one first", m.Name, clonedURL, existing.Source)
+	}
+
 	// Vendor the reviewable SOURCE (not built artifacts) into the project.
 	src := sourceFiles(m.Runtime, m.Entrypoint, m.Name)
 	dst := filepath.Join(smithDir, "tools", m.Name)
@@ -691,16 +785,6 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (a
 		return adoptResult{}, err
 	}
 
-	lock, err := loadProjLock()
-	if err != nil {
-		return adoptResult{}, err
-	}
-	// Refuse to silently replace a same-named pin from a different source (the
-	// mise path guards this too): two tools that derive the same name can't
-	// coexist, and overwriting would leave PATH order to decide which runs.
-	if existing, ok := lock.Tools[m.Name]; ok && existing.Source != clonedURL {
-		return adoptResult{}, fmt.Errorf("adopting %q from %s would overwrite the existing pin from %s (same name, different source); remove the old one first", m.Name, clonedURL, existing.Source)
-	}
 	lock.Tools[m.Name] = ProjTool{
 		Source: clonedURL, Version: version, Sha256: sum,
 		Entrypoint: m.Entrypoint, Runtime: m.Runtime,
@@ -795,7 +879,11 @@ func cmdInstall(p config.Paths, args []string) error {
 		if sum != t.Sha256 {
 			return fmt.Errorf("%s: vendored source sha mismatch (pinned %s, got %s) — review %s and re-adopt", name, shortSha(t.Sha256), shortSha(sum), dir)
 		}
-		if extra := unexpectedFiles(dir, src); len(extra) > 0 {
+		extra, xerr := unexpectedFiles(dir, src)
+		if xerr != nil {
+			return fmt.Errorf("%s: scanning vendored dir: %w", name, xerr)
+		}
+		if len(extra) > 0 {
 			return fmt.Errorf("%s: vendored dir has un-pinned files not covered by the hash: %s — review %s and re-adopt", name, strings.Join(extra, ", "), dir)
 		}
 		if err := materializeTool(p, name, t, binDir, absBinEarly); err != nil {
@@ -831,6 +919,15 @@ func cmdInstall(p config.Paths, args []string) error {
 	fc, ferr := p.LoadFileConfig()
 	if ferr != nil {
 		return fmt.Errorf("reading %s (fix or remove it): %w", filepath.Join(p.Home, "config.yaml"), ferr)
+	}
+	// Validate the export setting so a typo can't silently defeat intent: a
+	// value like "Never" or "nevr" previously fell through to exporting (the
+	// opposite of what an operator who wrote `export: never` wanted). Reject any
+	// value that isn't a recognized keyword; empty means the default (always).
+	switch fc.Skills.Export {
+	case "", "always", "never":
+	default:
+		return fmt.Errorf("unknown skills.export %q in %s (want: always | never)", fc.Skills.Export, filepath.Join(p.Home, "config.yaml"))
 	}
 	if fc.Skills.Export != "never" {
 		for _, name := range names {

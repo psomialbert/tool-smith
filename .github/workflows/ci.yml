@@ -37,8 +37,10 @@ jobs:
       - name: Test
         run: mise exec -- go test ./...
 
-  # The full two-machine acceptance run (scripts/linux-e2e.sh) needs a
-  # privileged container + the private index + a gh token, so it is not run
-  # in CI. The sandbox-enforcement code paths it exercises are covered
-  # natively by the Go tests above on both runners (bwrap on Linux,
-  # sandbox-exec on macOS). Run linux-e2e.sh locally before a release.
+  # The full acceptance run (scripts/linux-e2e.sh) needs a privileged container
+  # (bubblewrap needs namespace setup) plus mise/go; it uses only local git
+  # repos and pushes nothing, so no index or gh token is required. It is not run
+  # in CI because of the privileged-container requirement. The
+  # sandbox-enforcement code paths it exercises are covered natively by the Go
+  # tests above on both runners (bwrap on Linux, sandbox-exec on macOS). Run
+  # linux-e2e.sh locally before a release.

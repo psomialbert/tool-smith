@@ -105,6 +105,17 @@ func TestLatestTagPicksHighestSemver(t *testing.T) {
 	}
 }
 
+// latestTag feeds the (hand-editable) lockfile source straight to git, so it
+// must reject a remote-helper transport / option-injection source BEFORE the
+// git call — the same gate `smith use` applies before cloning.
+func TestLatestTagRejectsMaliciousSource(t *testing.T) {
+	for _, src := range []string{"ext::sh -c touch${IFS}pwned", "fd::0", "-oProxyCommand=x"} {
+		if _, err := latestTag(src); err == nil {
+			t.Fatalf("latestTag must refuse dangerous source %q", src)
+		}
+	}
+}
+
 func TestUpgradeReAdoptsToLatest(t *testing.T) {
 	requireSandbox(t)
 	if _, err := exec.LookPath("git"); err != nil {

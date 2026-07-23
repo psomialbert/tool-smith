@@ -8,7 +8,7 @@ import (
 )
 
 func TestSeatbeltProfileWriteGrant(t *testing.T) {
-	prof := seatbeltProfile(Perms{WritePaths: []string{"/opt/cache", "/var/data"}})
+	prof := seatbeltProfile(Perms{WritePaths: []string{"/opt/cache", "/var/data"}}, nil)
 	for _, want := range []string{
 		`(allow file-write* (subpath "/opt/cache"))`,
 		`(allow file-write* (subpath "/var/data"))`,
@@ -18,20 +18,34 @@ func TestSeatbeltProfileWriteGrant(t *testing.T) {
 		}
 	}
 	// Strict profile grants no extra paths.
-	if strings.Contains(seatbeltProfile(Perms{}), "/opt/cache") {
+	if strings.Contains(seatbeltProfile(Perms{}, nil), "/opt/cache") {
 		t.Fatal("strict profile must not grant extra write paths")
 	}
 }
 
+// A read-only path must be re-denied write access AFTER the broad TMP allow, so
+// a clone dir under $TMPDIR can't be rewritten by its own self-test.
+func TestSeatbeltProfileReadOnlyDenyOrder(t *testing.T) {
+	prof := seatbeltProfile(Perms{}, []string{"/private/tmp/smith-adopt-x/repo"})
+	deny := `(deny file-write* (subpath "/private/tmp/smith-adopt-x/repo"))`
+	if !strings.Contains(prof, deny) {
+		t.Fatalf("profile missing read-only deny %q:\n%s", deny, prof)
+	}
+	tmpAllow := `(allow file-write* (subpath (param "TMP")))`
+	if strings.Index(prof, deny) < strings.Index(prof, tmpAllow) {
+		t.Fatal("read-only deny must come AFTER the TMP allow (Seatbelt is last-match-wins)")
+	}
+}
+
 func TestProfileNameDistinctPerPerms(t *testing.T) {
-	if profileName(Perms{}) != "default.sb" {
+	if profileName(Perms{}, nil) != "default.sb" {
 		t.Fatal("strict → default.sb")
 	}
-	if profileName(Perms{Network: true}) != "net.sb" {
+	if profileName(Perms{Network: true}, nil) != "net.sb" {
 		t.Fatal("network → net.sb")
 	}
-	a := profileName(Perms{WritePaths: []string{"/a"}})
-	b := profileName(Perms{WritePaths: []string{"/b"}})
+	a := profileName(Perms{WritePaths: []string{"/a"}}, nil)
+	b := profileName(Perms{WritePaths: []string{"/b"}}, nil)
 	if a == b {
 		t.Fatalf("distinct write-path perms must get distinct profile names (%s == %s)", a, b)
 	}
@@ -39,8 +53,14 @@ func TestProfileNameDistinctPerPerms(t *testing.T) {
 		t.Fatalf("write-path profile should be hash-named, got %q", a)
 	}
 	// Order-independent (sorted): same set → same name.
-	if profileName(Perms{WritePaths: []string{"/a", "/b"}}) != profileName(Perms{WritePaths: []string{"/b", "/a"}}) {
+	if profileName(Perms{WritePaths: []string{"/a", "/b"}}, nil) != profileName(Perms{WritePaths: []string{"/b", "/a"}}, nil) {
 		t.Fatal("profileName must be order-independent")
+	}
+	// A read-only-path deny must also make the profile distinct + hash-named, so
+	// a strict-looking run with a clone deny can't reuse the cached default.sb.
+	ro := profileName(Perms{}, []string{"/private/tmp/repo"})
+	if ro == "default.sb" || !strings.HasPrefix(ro, "p-") {
+		t.Fatalf("read-only-path profile must be hash-named, got %q", ro)
 	}
 }
 
@@ -59,11 +79,11 @@ func TestFunctionalProbe(t *testing.T) {
 }
 
 func TestSeatbeltProfileNetworkGrant(t *testing.T) {
-	strict := seatbeltProfile(Perms{})
+	strict := seatbeltProfile(Perms{}, nil)
 	if !strings.Contains(strict, "(deny network*)") {
 		t.Fatal("strict profile must deny network")
 	}
-	granted := seatbeltProfile(Perms{Network: true})
+	granted := seatbeltProfile(Perms{Network: true}, nil)
 	if strings.Contains(granted, "(deny network*)") {
 		t.Fatal("network-granted profile must not deny network")
 	}

@@ -36,8 +36,14 @@ var v2ConfigKeys = map[string]bool{
 func cmdMigrate(p config.Paths, args []string) error {
 	quiet := false
 	for _, a := range args {
-		if a == "--quiet" || a == "-q" {
+		switch a {
+		case "--quiet", "-q":
 			quiet = true
+		default:
+			// Reject unknown flags rather than ignoring them: a user typing
+			// `smith migrate --dry-run` expecting a no-op would otherwise trigger
+			// a real (albeit reversible) migration.
+			return fmt.Errorf("unknown argument %q (usage: smith migrate [--quiet]); migrate has no dry-run — it backs up reversibly", a)
 		}
 	}
 	say := func(format string, a ...any) {
@@ -46,7 +52,10 @@ func cmdMigrate(p config.Paths, args []string) error {
 		}
 	}
 
-	present, staleKeys := diagnoseV1Home(p)
+	present, staleKeys, derr := diagnoseV1Home(p)
+	if derr != nil {
+		return fmt.Errorf("reading %s: %w", filepath.Join(p.Home, "config.yaml"), derr)
+	}
 	if len(present) == 0 && len(staleKeys) == 0 {
 		say("smith: already on the v2 layout; nothing to migrate")
 		return nil
@@ -69,21 +78,24 @@ func cmdMigrate(p config.Paths, args []string) error {
 
 // diagnoseV1Home reports retired v1 artifacts present in SMITH_HOME and dead
 // config keys, without mutating anything (used by `smith doctor`).
-func diagnoseV1Home(p config.Paths) (present []string, staleKeys []string) {
+func diagnoseV1Home(p config.Paths) (present []string, staleKeys []string, err error) {
 	for _, name := range v1HomeArtifacts {
 		if _, err := os.Lstat(filepath.Join(p.Home, name)); err == nil {
 			present = append(present, name)
 		}
 	}
-	staleKeys, _ = configStaleKeyNames(filepath.Join(p.Home, "config.yaml"))
-	return present, staleKeys
+	// Surface a genuine read error (e.g. permission denied) instead of reporting
+	// "no stale keys": otherwise doctor's v1 check would read clean while
+	// `smith migrate` would later fail on the same unreadable config.
+	staleKeys, err = configStaleKeyNames(filepath.Join(p.Home, "config.yaml"))
+	return present, staleKeys, err
 }
 
 // applyV1Migrate backs up retired dirs to a timestamped dir and strips dead
 // config keys, returning what it did. A fixed (per-day) backup name keeps it
 // deterministic and re-runnable.
 func applyV1Migrate(p config.Paths) (moved []string, dropped []string, backup string, err error) {
-	present, _ := diagnoseV1Home(p)
+	present, _, _ := diagnoseV1Home(p)
 	if len(present) > 0 {
 		backup = filepath.Join(p.Home, ".v1-backup-"+time.Now().Format("20060102"))
 		if err = os.MkdirAll(backup, 0o755); err != nil {
