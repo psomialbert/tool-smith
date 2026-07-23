@@ -207,7 +207,27 @@ allowlist:
 `smith use` refuses (before cloning) any source that matches no pattern;
 `smith allowlist` shows the effective policy. Absent = adopt anything. This
 is a policy layer on top of the per-project review, for orgs that want central
-control. (Signing the allowlist for tamper-evident distribution is future.)
+control.
+
+**Signed allowlist (tamper-evident).** To stop a machine's config from silently
+pointing at a widened list, sign the allowlist file with an ed25519 key and pin
+the public key:
+
+```sh
+smith allowlist keygen                       # → private key file + a public_key to paste
+smith allowlist sign allow.txt --key <priv>  # → allow.txt.sig
+```
+```yaml
+allowlist:
+  file: /etc/smith/allow.txt
+  public_key: <base64 ed25519 public key>
+```
+
+When `public_key` is set, smith verifies `allow.txt.sig` on every adoption and
+**fails closed** (blocks all adoptions) if it's missing, invalid, or the file
+was edited. `smith allowlist verify` reports the status. Distribute the public
+key + signed file with your fleet config; keep the private key off developer
+machines.
 
 ## Updating an adopted tool
 

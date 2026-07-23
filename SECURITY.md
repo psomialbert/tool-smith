@@ -50,7 +50,9 @@ agent into adopting or running something it shouldn't.
   adoption.
 - **Optional org allowlist.** A machine can restrict which repos may be adopted
   (`$SMITH_HOME/config.yaml`), provisioned outside any project so a project PR
-  can't widen it.
+  can't widen it. The allowlist file can be **ed25519-signed**: with a pinned
+  `public_key`, smith verifies the signature on every adoption and fails closed
+  if the file was edited or the signature is missing/invalid.
 
 ### What smith does NOT defend against (assumptions & limits)
 

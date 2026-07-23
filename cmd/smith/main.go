@@ -117,7 +117,8 @@ Usage:
   smith lens [--json]            agent-facing index of this project's tools
                                  (triggers + how to invoke); run to see the toolbox
   smith list                     list tools adopted in this project
-  smith allowlist                show the org adoption policy (if any)
+  smith allowlist [keygen|sign <file>|verify]  show the org adoption policy;
+                                 subcommands manage an ed25519-signed allowlist
   smith migrate                  clean up retired v1 files in SMITH_HOME
                                  (backs them up first; safe to re-run)
   smith doctor [--fix] [--json]  diagnose machine + project health; --fix repairs
@@ -242,12 +243,23 @@ func cmdList(p config.Paths, args []string) error {
 // ---------------------------------------------------------------- allowlist
 
 func cmdAllowlist(p config.Paths, args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "keygen":
+			return allowlistKeygen(args[1:])
+		case "sign":
+			return allowlistSign(args[1:])
+		case "verify":
+			return allowlistVerify(p)
+		}
+	}
 	fc, err := p.LoadFileConfig()
 	if err != nil {
 		return err
 	}
 	pats, err := allowlistPatterns(fc)
 	if err != nil {
+		// A signature failure blocks adoptions; surface it here too.
 		return err
 	}
 	cfg := filepath.Join(p.Home, "config.yaml")
@@ -259,6 +271,11 @@ func cmdAllowlist(p config.Paths, args []string) error {
 	fmt.Printf("adoption allowlist (from %s):\n", cfg)
 	for _, pat := range pats {
 		fmt.Printf("  %s\n", pat)
+	}
+	if fc.Allowlist.File != "" && fc.Allowlist.PublicKey != "" {
+		fmt.Println("signature: OK (allowlist file verifies against public_key)")
+	} else if fc.Allowlist.File != "" {
+		fmt.Println("signature: unsigned (set allowlist.public_key + `smith allowlist sign` for tamper-evidence)")
 	}
 	fmt.Println("only sources matching a pattern can be `smith use`d on this machine.")
 	return nil
