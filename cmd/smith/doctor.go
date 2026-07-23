@@ -182,27 +182,7 @@ func miseLocalTracked() bool {
 // ": " and quotes — valid to the Claude harness but rejected by a strict YAML
 // plain-scalar parse. We only care whether a real trigger is present.
 func skillTriggerIssue(skillPath string) (reason string, bad bool) {
-	raw, err := os.ReadFile(skillPath)
-	if err != nil {
-		return "SKILL.md missing", true
-	}
-	text := string(raw)
-	if !strings.HasPrefix(text, "---") {
-		return "SKILL.md has no frontmatter", true
-	}
-	rest := text[3:]
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		return "SKILL.md frontmatter not closed", true
-	}
-	desc := ""
-	for _, ln := range strings.Split(rest[:end], "\n") {
-		s := strings.TrimSpace(ln)
-		if strings.HasPrefix(s, "description:") {
-			desc = strings.TrimSpace(strings.TrimPrefix(s, "description:"))
-			break
-		}
-	}
+	desc := skillDescription(skillPath)
 	if desc == "" {
 		return "empty or missing SKILL.md trigger", true
 	}
@@ -210,6 +190,35 @@ func skillTriggerIssue(skillPath string) (reason string, bad bool) {
 		return "placeholder SKILL.md trigger — sharpen it", true
 	}
 	return "", false
+}
+
+// skillDescription returns the frontmatter `description:` (the agent trigger)
+// from a SKILL.md, or "" if the file/frontmatter/key is absent or empty. It
+// line-scans rather than strict-YAML-parsing: these triggers are prose that
+// legitimately contains ": " and quotes — valid to the Claude harness but
+// rejected by a strict YAML plain-scalar parse. Shared by the doctor
+// skill-trigger check and `smith lens`.
+func skillDescription(skillPath string) string {
+	raw, err := os.ReadFile(skillPath)
+	if err != nil {
+		return ""
+	}
+	text := string(raw)
+	if !strings.HasPrefix(text, "---") {
+		return ""
+	}
+	rest := text[3:]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return ""
+	}
+	for _, ln := range strings.Split(rest[:end], "\n") {
+		s := strings.TrimSpace(ln)
+		if strings.HasPrefix(s, "description:") {
+			return strings.TrimSpace(strings.TrimPrefix(s, "description:"))
+		}
+	}
+	return ""
 }
 
 // doctorChecks is the full registry, in report order.
