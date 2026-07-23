@@ -95,7 +95,13 @@ a **human reviews the PR and adopts**.
 
 | Agents may | Humans own |
 |---|---|
-| `new` (author), `use`/`upgrade` (propose adoption), `diff`/`review` (read), `search`, `list`, `doctor`, `install` | reviewing + **merging the adoption PR** (the trust decision) |
+| `new` (author), `use`/`upgrade` (propose adoption), `diff`/`review`/`lens` (read), `search`, `list`, `doctor`, `install` | reviewing + **merging the adoption PR** (the trust decision) |
+
+**Discovering a project's tools.** `smith lens` prints an agent-facing index of
+the tools *this* project has adopted — each tool's trigger and how to invoke it.
+Unlike the globally-exported per-tool skills, it's project-scoped and always
+fresh. Recommend adding to a project's agent instructions (e.g. `AGENTS.md`):
+"run `smith lens` to see this project's adopted tools."
 
 `smith use` runs the tool's self-test sandboxed and writes a reviewable diff;
 it never grants trust on its own — the tool becomes PATH-available only once

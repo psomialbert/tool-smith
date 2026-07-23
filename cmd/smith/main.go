@@ -63,6 +63,8 @@ func main() {
 		err = cmdReview(paths, args)
 	case "verify":
 		err = cmdVerify(paths, args)
+	case "lens":
+		err = cmdLens(paths, args)
 	case "list", "status":
 		err = cmdList(paths, args)
 	case "allowlist":
@@ -112,6 +114,8 @@ Usage:
   smith diff <tool>[@<ver>]      preview the source changes an upgrade would make
   smith verify [--frozen] [--json]  re-hash vendored source vs pins (CI integrity
                                  gate); --frozen also fails on un-pinned dirs
+  smith lens [--json]            agent-facing index of this project's tools
+                                 (triggers + how to invoke); run to see the toolbox
   smith list                     list tools adopted in this project
   smith allowlist                show the org adoption policy (if any)
   smith migrate                  clean up retired v1 files in SMITH_HOME
