@@ -1,5 +1,5 @@
-// Package sandbox wraps a command so Tier 0/2 tools only ever execute inside
-// an OS sandbox (§7 invariant). macOS uses a Seatbelt profile via
+// Package sandbox wraps a command so an unadopted tool's self-test only ever
+// executes inside an OS sandbox. macOS uses a Seatbelt profile via
 // sandbox-exec; Linux uses bubblewrap. If no sandbox mechanism is available
 // the caller must refuse to run — never fall back to unsandboxed execution.
 package sandbox
@@ -134,18 +134,23 @@ const linuxScratchHome = "/tmp/smith-home"
 
 // Env builds the sanitized environment for a sandboxed run. HOME points at
 // a scratch dir (inside TMP, so the profile allows writes there). passEnv
-// names extra parent vars the caller explicitly chose to forward.
-func Env(passEnv []string) ([]string, error) {
+// names extra parent vars the caller explicitly chose to forward. The returned
+// cleanup func removes the scratch HOME; it is always non-nil (a no-op on
+// Linux, where HOME is a fixed path inside the bwrap tmpfs) — call it with
+// defer so the darwin scratch dir doesn't leak on every sandboxed run.
+func Env(passEnv []string) (env []string, cleanup func(), err error) {
+	cleanup = func() {}
 	var scratchHome string
 	if runtime.GOOS == "linux" {
 		scratchHome = linuxScratchHome
 	} else {
-		var err error
 		if scratchHome, err = os.MkdirTemp("", "smith-scratch-home-"); err != nil {
-			return nil, err
+			return nil, cleanup, err
 		}
+		dir := scratchHome
+		cleanup = func() { os.RemoveAll(dir) }
 	}
-	env := []string{"HOME=" + scratchHome, "SMITH_SANDBOX=1"}
+	env = []string{"HOME=" + scratchHome, "SMITH_SANDBOX=1"}
 	for _, k := range envAllowlist {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
@@ -158,11 +163,28 @@ func Env(passEnv []string) ([]string, error) {
 		}
 		v, ok := os.LookupEnv(k)
 		if !ok {
-			return nil, fmt.Errorf("--pass-env %s: not set in parent environment", k)
+			cleanup()
+			return nil, func() {}, fmt.Errorf("--pass-env %s: not set in parent environment", k)
 		}
 		env = append(env, k+"="+v)
 	}
-	return env, nil
+	return env, cleanup, nil
+}
+
+// resolveSymlinks canonicalizes p, following symlinks. For a path that doesn't
+// exist yet (a write grant for a dir the tool will create) it resolves the
+// deepest existing ancestor and re-appends the remainder, so a grant under a
+// symlinked prefix (/tmp, /var, /etc -> /private/... on macOS) still matches
+// the path the kernel checks.
+func resolveSymlinks(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	dir := filepath.Dir(p)
+	if dir == p { // reached root; nothing more to resolve
+		return p
+	}
+	return filepath.Join(resolveSymlinks(dir), filepath.Base(p))
 }
 
 // Command returns the full argv that runs `argv` sandboxed under perms, with
@@ -172,30 +194,35 @@ func Command(profilesDir, workDir string, perms Perms, argv []string) ([]string,
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("sandbox-exec"); err != nil {
-			return nil, fmt.Errorf("sandbox-exec not found; refusing to run quarantined tool unsandboxed")
-		}
-		profile, err := ensureProfile(profilesDir, perms)
-		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("sandbox-exec not found; refusing to run tool unsandboxed")
 		}
 		cwd := workDir
 		if cwd == "" {
+			var err error
 			if cwd, err = os.Getwd(); err != nil {
 				return nil, err
 			}
 		}
-		if r, err := filepath.EvalSymlinks(cwd); err == nil {
-			cwd = r
+		cwd = resolveSymlinks(cwd)
+		tmp := resolveSymlinks(os.TempDir())
+		// Resolve granted write paths the same way as CWD/TMP: the kernel
+		// canonicalizes the accessed path (e.g. /tmp -> /private/tmp on macOS),
+		// so an unresolved subpath rule would never match and the grant would
+		// silently not take effect. Enforce it consistently with Linux bwrap.
+		rp := perms
+		rp.WritePaths = make([]string, len(perms.WritePaths))
+		for i, w := range perms.WritePaths {
+			rp.WritePaths[i] = resolveSymlinks(w)
 		}
-		tmp := os.TempDir()
-		if r, err := filepath.EvalSymlinks(tmp); err == nil {
-			tmp = r
+		profile, err := ensureProfile(profilesDir, rp)
+		if err != nil {
+			return nil, err
 		}
 		out := []string{"sandbox-exec", "-f", profile, "-D", "CWD=" + cwd, "-D", "TMP=" + tmp}
 		return append(out, argv...), nil
 	case "linux":
 		if _, err := exec.LookPath("bwrap"); err != nil {
-			return nil, fmt.Errorf("bwrap (bubblewrap) not found; refusing to run quarantined tool unsandboxed")
+			return nil, fmt.Errorf("bwrap (bubblewrap) not found; refusing to run tool unsandboxed")
 		}
 		cwd := workDir
 		if cwd == "" {
@@ -221,6 +248,6 @@ func Command(profilesDir, workDir string, perms Perms, argv []string) ([]string,
 		}
 		return append(out, argv...), nil
 	default:
-		return nil, fmt.Errorf("no sandbox mechanism for %s; refusing to run quarantined tool", runtime.GOOS)
+		return nil, fmt.Errorf("no sandbox mechanism for %s; refusing to run tool unsandboxed", runtime.GOOS)
 	}
 }

@@ -8,6 +8,40 @@ import (
 	"testing"
 )
 
+// TestLoadManifestRejectsTraversal guards the adoption-path fix: a hostile tool
+// repo must not be able to feed a "../"-laden name/entrypoint that escapes
+// .smith/ when joined into a filesystem path (arbitrary delete/write before the
+// human ever reviews the vendored diff).
+func TestLoadManifestRejectsTraversal(t *testing.T) {
+	cases := []struct {
+		name, manifest string
+	}{
+		{"name-traversal", "name: ../../../../tmp/pwn\nversion: 0.1.0\nentrypoint: pwn\nruntime: bash\n"},
+		{"name-slash", "name: evil/sub\nversion: 0.1.0\nentrypoint: x\nruntime: bash\n"},
+		{"name-dotdot", "name: ..\nversion: 0.1.0\nentrypoint: x\nruntime: bash\n"},
+		{"entrypoint-traversal", "name: ok\nversion: 0.1.0\nentrypoint: ../../../home/victim/.local/bin/x\nruntime: go\n"},
+		{"entrypoint-absolute", "name: ok\nversion: 0.1.0\nentrypoint: /etc/cron.d/x\nruntime: bash\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "manifest.yaml"), []byte(c.manifest), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadManifest(dir); err == nil {
+				t.Fatalf("LoadManifest accepted a traversal manifest: %s", c.manifest)
+			}
+		})
+	}
+	// A legitimate manifest (including a subdir entrypoint) still loads.
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "manifest.yaml"),
+		[]byte("name: greet\nversion: 0.1.0\nentrypoint: bin/greet\nruntime: bash\n"), 0o644)
+	if _, err := LoadManifest(dir); err != nil {
+		t.Fatalf("LoadManifest rejected a valid manifest: %v", err)
+	}
+}
+
 // TestManifestOmitsDescriptionSkillKeepsIt locks in the single-source-of-truth
 // for a tool's description: it lives in the SKILL.md frontmatter (the agent
 // trigger), NOT in manifest.yaml. Two descriptions drift — an agent updated the

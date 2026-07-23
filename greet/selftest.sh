@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Self-test for greet. Invoked by `smith register` as: selftest.sh <tool>
-# inside the sandbox (no network, writes only to CWD/TMP). Exit 0 = pass.
+# Self-test for greet. Run sandboxed by `smith use` as: selftest.sh <tool>
+# (no network, writes only to CWD/TMP) before the tool's source is vendored
+# into a project. It is the adoption gate. Exit 0 = pass.
 #
-# A passing self-test is NECESSARY for Tier 0 registration but NOT SUFFICIENT
-# for trust — promotion review still reads the source (spec §7).
+# A passing self-test is NECESSARY but NOT SUFFICIENT for trust: adoption is a
+# reviewable commit, and the reviewer still reads the vendored source.
 set -euo pipefail
 TOOL="$1"
 

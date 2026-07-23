@@ -192,9 +192,9 @@ func TestInstalledCheckDetectsMissing(t *testing.T) {
 	os.Chdir(dir)
 	defer os.Chdir(restore)
 
-	seedBashTool(t, "greet")
+	sum := seedBashTool(t, "greet")
 	lock := ProjLock{Tools: map[string]ProjTool{
-		"greet": {Source: "x/greet", Version: "v1", Entrypoint: "greet", Runtime: "bash"},
+		"greet": {Source: "x/greet", Version: "v1", Sha256: sum, Entrypoint: "greet", Runtime: "bash"},
 	}}
 	dc := docCtx{projectDir: ".", lock: lock}
 	c := findCheck("installed")

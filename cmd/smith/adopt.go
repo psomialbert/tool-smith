@@ -106,6 +106,18 @@ func sourceFiles(runtime, entrypoint, name string) []string {
 	return append(src, metaParts...)
 }
 
+// shortSha returns the first 12 chars of a hex sha for messages, tolerating a
+// short/empty pin (a hand-edited lockfile) instead of panicking on a slice.
+func shortSha(s string) string {
+	if len(s) < 12 {
+		if s == "" {
+			return "(none)"
+		}
+		return s
+	}
+	return s[:12]
+}
+
 // bundleHash hashes a set of files deterministically: sorted "<rel>\0<sha>\n".
 func bundleHash(dir string, files []string) (string, error) {
 	fs := append([]string(nil), files...)
@@ -162,10 +174,11 @@ func warmUVCache(p config.Paths, workdir, scriptAbs, cacheAbs string) error {
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = workdir
-	env, err := sandbox.Env(nil)
+	env, cleanup, err := sandbox.Env(nil)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	cmd.Env = append(env, "UV_CACHE_DIR="+cacheAbs)
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	return cmd.Run()
@@ -200,7 +213,72 @@ func expandSource(s string) string {
 	if strings.Count(s, "/") == 1 {
 		return "https://github.com/" + s
 	}
+	// host-qualified "host.tld/owner/repo": the first segment is a hostname, so
+	// canonicalize to https. Otherwise it would be handed to `git clone` as a
+	// LOCAL relative directory of that name — which a host-based allowlist
+	// pattern (e.g. github.com/acme/*) would wrongly permit while cloning
+	// attacker-controlled local code.
+	if i := strings.IndexByte(s, '/'); i > 0 && strings.Contains(s[:i], ".") {
+		return "https://" + s
+	}
 	return s
+}
+
+// validCloneURL rejects clone sources that `git clone` would treat as an
+// option or a remote-helper transport (ext::/fd:: → arbitrary command
+// execution on the host, before any sandbox or review). Explicit URLs, scp
+// syntax, and local paths are fine.
+func validCloneURL(url string) error {
+	if strings.HasPrefix(url, "-") {
+		return fmt.Errorf("refusing clone source %q (leading '-' looks like a git option)", url)
+	}
+	// Transport helpers use "<helper>::<address>"; a real URL/path never does.
+	if i := strings.Index(url, "::"); i >= 0 && !strings.Contains(url[:i], "/") {
+		return fmt.Errorf("refusing clone source %q (git remote-helper transport %q is not allowed)", url, url[:i])
+	}
+	return nil
+}
+
+// gitClone clones url into dir after validating url, forwarding progress to
+// stderr. The `--` guards against a source that slipped past validCloneURL
+// still being parsed as an option.
+func gitClone(url, dir string) error {
+	if err := validCloneURL(url); err != nil {
+		return err
+	}
+	cc := exec.Command("git", "clone", "--quiet", "--", url, dir)
+	cc.Stdout, cc.Stderr = os.Stderr, os.Stderr
+	if err := cc.Run(); err != nil {
+		return fmt.Errorf("cloning %s: %w", url, err)
+	}
+	return nil
+}
+
+// unexpectedFiles walks dir and returns any regular file whose relative path is
+// not in expected. A vendored tool dir holds exactly its pinned source files;
+// anything else (e.g. a requests.py dropped next to a python entrypoint) is
+// invisible to the bundle hash yet can hijack execution, so it is drift.
+func unexpectedFiles(dir string, expected []string) []string {
+	want := make(map[string]bool, len(expected))
+	for _, f := range expected {
+		want[filepath.ToSlash(f)] = true
+	}
+	var extra []string
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(dir, p)
+		if rerr != nil {
+			return nil
+		}
+		if !want[filepath.ToSlash(rel)] {
+			extra = append(extra, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	sort.Strings(extra)
+	return extra
 }
 
 // allowlistPatterns returns the org's permitted-source patterns: config
@@ -208,17 +286,20 @@ func expandSource(s string) string {
 func allowlistPatterns(fc config.FileConfig) ([]string, error) {
 	pats := append([]string(nil), fc.Allowlist.Repos...)
 	if fc.Allowlist.File != "" {
+		// Read the allowlist ONCE, then verify those exact bytes: the bytes we
+		// parse into patterns are the bytes we checked the signature against,
+		// with no verify-then-reread window an attacker could swap in between.
+		raw, err := os.ReadFile(fc.Allowlist.File)
+		if err != nil {
+			return nil, fmt.Errorf("reading allowlist file %s: %w", fc.Allowlist.File, err)
+		}
 		// Tamper-evidence: if a public key is configured, the allowlist file
 		// MUST carry a valid signature — else fail closed (block adoptions),
 		// so a machine's config can't silently point at a widened list.
 		if fc.Allowlist.PublicKey != "" {
-			if err := verifyAllowlistSig(fc.Allowlist.File, fc.Allowlist.PublicKey); err != nil {
+			if err := verifyAllowlistData(fc.Allowlist.File, raw, fc.Allowlist.PublicKey); err != nil {
 				return nil, fmt.Errorf("allowlist signature check failed — adoptions blocked: %w", err)
 			}
-		}
-		raw, err := os.ReadFile(fc.Allowlist.File)
-		if err != nil {
-			return nil, fmt.Errorf("reading allowlist file %s: %w", fc.Allowlist.File, err)
 		}
 		for _, line := range strings.Split(string(raw), "\n") {
 			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
@@ -291,7 +372,12 @@ func cmdUse(p config.Paths, args []string) error {
 	clonedURL := expandSource(source)
 
 	// Org policy: refuse (before cloning) sources the allowlist doesn't permit.
-	fc, _ := p.LoadFileConfig()
+	// A config that won't load must fail closed — a corrupt config.yaml can't
+	// be allowed to silently disable the allowlist.
+	fc, err := p.LoadFileConfig()
+	if err != nil {
+		return fmt.Errorf("reading %s (fix or remove it): %w", filepath.Join(p.Home, "config.yaml"), err)
+	}
 	if pats, perr := allowlistPatterns(fc); perr != nil {
 		return perr
 	} else if len(pats) > 0 && !allowlistPermits(pats, source, clonedURL) {
@@ -328,8 +414,12 @@ func cmdUseMise(p config.Paths, spec, version string) error {
 	}
 
 	// External tools are policy-gated too. Match the spec and its repo part
-	// (after the backend colon, e.g. DataDog/pup).
-	fc, _ := p.LoadFileConfig()
+	// (after the backend colon, e.g. DataDog/pup). A config that won't load
+	// fails closed, so it can't silently disable the allowlist.
+	fc, err := p.LoadFileConfig()
+	if err != nil {
+		return fmt.Errorf("reading %s (fix or remove it): %w", filepath.Join(p.Home, "config.yaml"), err)
+	}
 	if pats, perr := allowlistPatterns(fc); perr != nil {
 		return perr
 	} else if len(pats) > 0 {
@@ -367,7 +457,12 @@ func cmdUseMise(p config.Paths, spec, version string) error {
 		return err
 	}
 	name := miseToolName(spec)
-	lock.Tools[name] = ProjTool{Source: "mise:" + spec, Version: version, Runtime: "mise"}
+	newSource := "mise:" + spec
+	if existing, ok := lock.Tools[name]; ok && existing.Source != newSource {
+		return fmt.Errorf("adopting %q would overwrite the existing pin %q (both derive the name %q); they can't coexist in this project",
+			spec, existing.Source, name)
+	}
+	lock.Tools[name] = ProjTool{Source: newSource, Version: version, Runtime: "mise"}
 	if err := saveProjLock(lock); err != nil {
 		return err
 	}
@@ -448,10 +543,8 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (a
 	}
 	defer os.RemoveAll(tmp)
 	clone := filepath.Join(tmp, "repo")
-	cc := exec.Command("git", "clone", "--quiet", clonedURL, clone)
-	cc.Stdout, cc.Stderr = os.Stderr, os.Stderr
-	if err := cc.Run(); err != nil {
-		return adoptResult{}, fmt.Errorf("cloning %s: %w", clonedURL, err)
+	if err := gitClone(clonedURL, clone); err != nil {
+		return adoptResult{}, err
 	}
 	if version != "" {
 		co := exec.Command("git", "-C", clone, "checkout", "--quiet", version)
@@ -644,7 +737,10 @@ func cmdInstall(p config.Paths, args []string) error {
 			return fmt.Errorf("%s: %w", name, herr)
 		}
 		if sum != t.Sha256 {
-			return fmt.Errorf("%s: vendored source sha mismatch (pinned %s, got %s) — review %s and re-adopt", name, t.Sha256[:12], sum[:12], dir)
+			return fmt.Errorf("%s: vendored source sha mismatch (pinned %s, got %s) — review %s and re-adopt", name, shortSha(t.Sha256), shortSha(sum), dir)
+		}
+		if extra := unexpectedFiles(dir, src); len(extra) > 0 {
+			return fmt.Errorf("%s: vendored dir has un-pinned files not covered by the hash: %s — review %s and re-adopt", name, strings.Join(extra, ", "), dir)
 		}
 		if err := materializeTool(p, name, t, binDir, absBinEarly); err != nil {
 			return err

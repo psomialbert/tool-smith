@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"golang.org/x/term"
 )
@@ -117,14 +119,31 @@ func RunTerminal(m *Model, theme Theme) error {
 	if err != nil {
 		return err
 	}
-	defer term.Restore(fd, oldState)
+	restore := func() {
+		term.Restore(fd, oldState)
+		fmt.Fprint(os.Stdout, "\x1b[?25h\x1b[?1049l") // show cursor, leave alt screen
+	}
+	defer restore()
+
+	// A defer doesn't run when the process is killed by a signal, which would
+	// leave the shell in raw mode on the alternate screen. Catch the common
+	// external signals and restore first. (Ctrl-C in raw mode arrives as a byte,
+	// not SIGINT, so this is for SIGTERM/SIGHUP and the like.)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+	go func() {
+		if _, ok := <-sigCh; ok {
+			restore()
+			os.Exit(130)
+		}
+	}()
 
 	cols, rows, err := term.GetSize(fd)
 	if err != nil || rows < 3 || cols < 20 {
 		rows, cols = 24, 80
 	}
-	fmt.Fprint(os.Stdout, "\x1b[?1049h\x1b[?25l")       // alt screen, hide cursor
-	defer fmt.Fprint(os.Stdout, "\x1b[?25h\x1b[?1049l") // show cursor, leave alt screen
+	fmt.Fprint(os.Stdout, "\x1b[?1049h\x1b[?25l") // alt screen, hide cursor
 
 	return Run(m, os.Stdin, os.Stdout, rows, cols, theme)
 }

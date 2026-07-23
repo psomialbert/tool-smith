@@ -79,8 +79,10 @@ a skill fix only reaches fresh installs once it's in a **new release**. After
 merging a change that touches the skill or the binary:
 
 1. Tag `v<x.y.z>` on `main`, push the tag.
-2. `make cross` (builds the 4 binaries + copies `cli-creator-SKILL.md` into `dist/`).
-3. `gh release create v<x.y.z> ... dist/smith-* dist/cli-creator-SKILL.md`.
+2. `make cross` (builds the 4 binaries, copies `cli-creator-SKILL.md`, and
+   writes `SHA256SUMS` into `dist/`).
+3. `gh release create v<x.y.z> ... dist/smith-* dist/cli-creator-SKILL.md dist/SHA256SUMS`
+   (`scripts/install.sh` verifies the downloaded binary against `SHA256SUMS`).
 
 Historical `register`/`promote` mentions in `ROADMAP.md` and `toolsmith-spec.md`
 are accurate history/original-design docs — leave them; they are not

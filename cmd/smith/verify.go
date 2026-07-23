@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"smith/internal/config"
 )
@@ -48,13 +49,20 @@ func cmdVerify(p config.Paths, args []string) error {
 			bad++
 			continue
 		}
-		sum, herr := bundleHash(dir, sourceFiles(t.Runtime, t.Entrypoint, name))
+		src := sourceFiles(t.Runtime, t.Entrypoint, name)
+		sum, herr := bundleHash(dir, src)
 		switch {
 		case herr != nil:
 			results = append(results, result{name, "error", herr.Error()})
 			bad++
 		case sum != t.Sha256:
 			results = append(results, result{name, "mismatch", "vendored sha ≠ pin — review and re-adopt"})
+			bad++
+		case len(unexpectedFiles(dir, src)) > 0:
+			// Files present in the vendored dir but outside the pinned source
+			// set are not covered by the hash yet can hijack execution — treat
+			// them as tampering, not just a --frozen concern.
+			results = append(results, result{name, "mismatch", "un-pinned files in vendored dir: " + strings.Join(unexpectedFiles(dir, src), ", ")})
 			bad++
 		default:
 			results = append(results, result{name, "ok", ""})
@@ -71,7 +79,15 @@ func cmdVerify(p config.Paths, args []string) error {
 	}
 
 	if *asJSON {
-		return jsonPrint(map[string]any{"results": results, "frozen": *frozen, "ok": bad == 0})
+		if err := jsonPrint(map[string]any{"results": results, "frozen": *frozen, "ok": bad == 0}); err != nil {
+			return err
+		}
+		// The integrity gate must fail closed in machine-readable mode too:
+		// exit nonzero on any problem so CI doesn't stay green on `ok:false`.
+		if bad > 0 {
+			return fmt.Errorf("verify failed: %d problem(s)", bad)
+		}
+		return nil
 	}
 	if len(names) == 0 && len(orphans) == 0 {
 		fmt.Println("no adopted tools to verify")

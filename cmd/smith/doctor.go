@@ -37,6 +37,7 @@ type docCtx struct {
 	p          config.Paths
 	projectDir string // "" if cwd is not a smith project
 	lock       ProjLock
+	lockErr    error // non-nil if .smith/tools.yaml exists but won't parse
 }
 
 // check is one health check: diagnose reports findings; apply (if non-nil)
@@ -54,7 +55,7 @@ func resolveDocCtx(p config.Paths) docCtx {
 	dc := docCtx{p: p}
 	if fi, err := os.Stat(smithDir); err == nil && fi.IsDir() {
 		dc.projectDir = "."
-		dc.lock, _ = loadProjLock()
+		dc.lock, dc.lockErr = loadProjLock()
 	}
 	return dc
 }
@@ -77,9 +78,17 @@ func runDoctor(dc docCtx, checks []check, doFix bool) []finding {
 					}
 				}
 			} else {
+				// Re-diagnose to confirm. Mark "(fixed)" only where a finding
+				// actually transitioned non-OK -> OK: a repair that silently
+				// didn't take stays visibly non-OK, and a finding that was OK
+				// all along isn't relabelled. diagnose is deterministic over
+				// the same context, so index i is the same subject before/after.
+				before := fs
 				fs = c.diagnose(dc)
 				for i := range fs {
-					fs[i].Fixed = true
+					if fs[i].Severity == sevOK && i < len(before) && before[i].Severity != sevOK {
+						fs[i].Fixed = true
+					}
 				}
 			}
 		}
@@ -276,6 +285,22 @@ func doctorChecks() []check {
 			},
 		},
 		{
+			name: "lockfile", scope: scopeProject,
+			diagnose: func(dc docCtx) []finding {
+				f := finding{Check: "lockfile", Scope: scopeProject}
+				if dc.lockErr != nil {
+					f.Severity = sevERROR
+					f.Message = ".smith/tools.yaml does not parse: " + dc.lockErr.Error()
+					f.FixHint = "fix the YAML by hand (a bad merge?) or restore it from git"
+				} else {
+					f.Severity = sevOK
+					f.Message = ".smith/tools.yaml parses"
+				}
+				return []finding{f}
+			},
+			// no apply: hand-editing YAML is human judgment
+		},
+		{
 			name: "activation", scope: scopeProject,
 			diagnose: func(dc docCtx) []finding {
 				binDir, _ := filepath.Abs(filepath.Join(dc.projectDir, smithDir, "bin"))
@@ -409,13 +434,28 @@ func doctorChecks() []check {
 					return err
 				}
 				for _, name := range sortedToolNames(dc.lock) {
-					if dc.lock.Tools[name].isMise() {
+					t := dc.lock.Tools[name]
+					if t.isMise() {
 						continue // external: fetched via mise, not materialized
 					}
 					if _, err := os.Lstat(filepath.Join(binDir, name)); err == nil {
 						continue
 					}
-					if err := materializeTool(dc.p, name, dc.lock.Tools[name], binDir, absBin); err != nil {
+					// Same integrity gate as `smith install`: never build/put on
+					// PATH a vendored tree that no longer matches its pin.
+					dir := filepath.Join(dc.projectDir, smithDir, "tools", name)
+					src := sourceFiles(t.Runtime, t.Entrypoint, name)
+					sum, herr := bundleHash(dir, src)
+					if herr != nil {
+						return fmt.Errorf("%s: %w", name, herr)
+					}
+					if sum != t.Sha256 {
+						return fmt.Errorf("%s: vendored source sha mismatch (pinned %s, got %s) — review %s and re-adopt", name, shortSha(t.Sha256), shortSha(sum), dir)
+					}
+					if extra := unexpectedFiles(dir, src); len(extra) > 0 {
+						return fmt.Errorf("%s: un-pinned files in vendored dir: %s — review %s and re-adopt", name, strings.Join(extra, ", "), dir)
+					}
+					if err := materializeTool(dc.p, name, t, binDir, absBin); err != nil {
 						return err
 					}
 				}
@@ -431,6 +471,9 @@ func doctorChecks() []check {
 				}
 				var out []finding
 				for _, name := range names {
+					if dc.lock.Tools[name].isMise() {
+						continue // external tool: no vendored SKILL.md by design
+					}
 					f := finding{Check: "skill-trigger", Scope: scopeProject}
 					path := filepath.Join(dc.projectDir, smithDir, "tools", name, "SKILL.md")
 					if reason, bad := skillTriggerIssue(path); bad {

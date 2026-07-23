@@ -110,7 +110,10 @@ func cmdUpgrade(p config.Paths, args []string) error {
 		names = sortedToolNames(lock)
 	}
 
-	fc, _ := p.LoadFileConfig()
+	fc, ferr := p.LoadFileConfig()
+	if ferr != nil {
+		return fmt.Errorf("reading %s (fix or remove it): %w", filepath.Join(p.Home, "config.yaml"), ferr)
+	}
 	pats, perr := allowlistPatterns(fc)
 	if perr != nil {
 		return perr
@@ -151,9 +154,17 @@ func cmdUpgrade(p config.Paths, args []string) error {
 	}
 
 	if *asJSON {
-		return jsonPrint(map[string]any{
+		if err := jsonPrint(map[string]any{
 			"upgraded": upgraded, "uptodate": uptodate, "failed": failed,
-		})
+		}); err != nil {
+			return err
+		}
+		// Machine-readable mode must still exit nonzero on failure, so CI that
+		// consumes the JSON doesn't stay green on a failed upgrade.
+		if len(failed) > 0 {
+			return fmt.Errorf("%d tool(s) failed to upgrade", len(failed))
+		}
+		return nil
 	}
 	for _, u := range upgraded {
 		note := ""
@@ -224,10 +235,8 @@ func cmdDiff(p config.Paths, args []string) error {
 	}
 	defer os.RemoveAll(tmp)
 	clone := filepath.Join(tmp, "repo")
-	cc := exec.Command("git", "clone", "--quiet", t.Source, clone)
-	cc.Stderr = os.Stderr
-	if err := cc.Run(); err != nil {
-		return fmt.Errorf("cloning %s: %w", t.Source, err)
+	if err := gitClone(t.Source, clone); err != nil {
+		return err
 	}
 	co := exec.Command("git", "-C", clone, "checkout", "--quiet", ver)
 	co.Stderr = os.Stderr

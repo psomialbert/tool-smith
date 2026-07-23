@@ -125,10 +125,11 @@ func TestEnvStripsSecrets(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "alsosecret")
 	t.Setenv("LANG", "en_US.UTF-8")
 
-	env, err := Env(nil)
+	env, cleanup, err := Env(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cleanup()
 	joined := strings.Join(env, "\n")
 	if strings.Contains(joined, "supersecret") || strings.Contains(joined, "GH_TOKEN") {
 		t.Fatalf("secret leaked into sandbox env:\n%s", joined)
@@ -148,14 +149,15 @@ func TestEnvStripsSecrets(t *testing.T) {
 
 func TestEnvExplicitPassthrough(t *testing.T) {
 	t.Setenv("GH_TOKEN", "supersecret")
-	env, err := Env([]string{"GH_TOKEN"})
+	env, cleanup, err := Env([]string{"GH_TOKEN"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cleanup()
 	if !strings.Contains(strings.Join(env, "\n"), "GH_TOKEN=supersecret") {
 		t.Fatal("explicit --pass-env var not forwarded")
 	}
-	if _, err := Env([]string{"NOT_SET_ANYWHERE_XYZ"}); err == nil {
+	if _, _, err := Env([]string{"NOT_SET_ANYWHERE_XYZ"}); err == nil {
 		t.Fatal("pass-env of unset var should error, not silently forward nothing")
 	}
 }

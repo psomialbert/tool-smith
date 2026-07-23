@@ -146,3 +146,73 @@ func TestRunEOFStops(t *testing.T) {
 		t.Fatalf("empty input should stop cleanly, got %v", err)
 	}
 }
+
+// TestParseKeyConsumesModifiedSequence guards the fix where a modified key
+// (Ctrl-Up = ESC [ 1 ; 5 A) must be consumed whole, not leave "1;5A" to be
+// misread as printable runes typed into a comment.
+func TestParseKeyConsumesModifiedSequence(t *testing.T) {
+	r := bufio.NewReader(strings.NewReader("\x1b[1;5Ax"))
+	k, _ := ParseKey(r)
+	if k.Kind != KeyUp {
+		t.Fatalf("modified up arrow: got kind %v, want KeyUp", k.Kind)
+	}
+	// The only byte left must be the trailing 'x'.
+	k2, _ := ParseKey(r)
+	if k2.Kind != KeyRune || k2.Rune != 'x' {
+		t.Fatalf("leftover bytes after CSI: got %+v", k2)
+	}
+}
+
+// TestInputBackspaceRune guards multibyte comment editing.
+func TestInputBackspaceRune(t *testing.T) {
+	m := New("t", "v", sampleFiles())
+	m.StartComment()
+	m.InputRune('å')
+	m.InputBackspace()
+	if m.Input != "" {
+		t.Fatalf("backspace left dangling bytes: %q", m.Input)
+	}
+	m.InputRune('a')
+	m.InputRune('ö')
+	m.InputBackspace()
+	if m.Input != "a" {
+		t.Fatalf("backspace of multibyte rune: %q, want %q", m.Input, "a")
+	}
+}
+
+// TestReportFenceEscapesBackticks guards against a snippet containing ``` from
+// breaking out of the code fence in the pasteable report.
+func TestReportFenceEscapesBackticks(t *testing.T) {
+	m := New("t", "v", []File{{Name: "x.md", Lang: "generic", Lines: []string{"before ``` after"}}})
+	m.StartComment()
+	for _, r := range "note" {
+		m.InputRune(r)
+	}
+	m.CommitComment()
+	rep := m.Report()
+	if !strings.Contains(rep, "````") {
+		t.Fatalf("report did not widen the fence past inner backticks:\n%s", rep)
+	}
+}
+
+// TestRenderEmptyFilesNoPanic guards the empty-bundle crash.
+func TestRenderEmptyFilesNoPanic(t *testing.T) {
+	m := New("t", "v", nil)
+	frame := Render(m, 10, 40, ThemeByName("mono"))
+	if len(frame) == 0 {
+		t.Fatal("empty render produced no frame")
+	}
+}
+
+// TestTruncateDisplayWidth guards that wide runes are measured as two columns
+// so a line can't overflow the row and corrupt the frame.
+func TestTruncateDisplayWidth(t *testing.T) {
+	if w := dispWidth("世界"); w != 4 {
+		t.Fatalf("dispWidth(世界) = %d, want 4", w)
+	}
+	// "世界" is 4 columns; truncating to 3 must not exceed 3 columns.
+	got := truncate("世界x", 3)
+	if dispWidth(got) > 3 {
+		t.Fatalf("truncate overflowed: %q is %d cols", got, dispWidth(got))
+	}
+}
