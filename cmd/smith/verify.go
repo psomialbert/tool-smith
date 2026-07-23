@@ -29,11 +29,12 @@ func cmdVerify(p config.Paths, args []string) error {
 
 	type result struct {
 		Tool   string `json:"tool"`
-		Status string `json:"status"` // ok | mismatch | missing | error | orphan
+		Status string `json:"status"` // ok | mismatch | missing | error | external | orphan
 		Detail string `json:"detail,omitempty"`
 	}
 	var results []result
 	bad := 0
+	verified := 0 // vendored tools that actually passed the hash check
 
 	names := sortedToolNames(lock)
 	for _, name := range names {
@@ -51,6 +52,7 @@ func cmdVerify(p config.Paths, args []string) error {
 		}
 		src := sourceFiles(t.Runtime, t.Entrypoint, name)
 		sum, herr := bundleHash(dir, src)
+		extra, xerr := unexpectedFiles(dir, src)
 		switch {
 		case herr != nil:
 			results = append(results, result{name, "error", herr.Error()})
@@ -58,14 +60,18 @@ func cmdVerify(p config.Paths, args []string) error {
 		case sum != t.Sha256:
 			results = append(results, result{name, "mismatch", "vendored sha ≠ pin — review and re-adopt"})
 			bad++
-		case len(unexpectedFiles(dir, src)) > 0:
+		case xerr != nil:
+			results = append(results, result{name, "error", "scanning vendored dir: " + xerr.Error()})
+			bad++
+		case len(extra) > 0:
 			// Files present in the vendored dir but outside the pinned source
 			// set are not covered by the hash yet can hijack execution — treat
 			// them as tampering, not just a --frozen concern.
-			results = append(results, result{name, "mismatch", "un-pinned files in vendored dir: " + strings.Join(unexpectedFiles(dir, src), ", ")})
+			results = append(results, result{name, "mismatch", "un-pinned files in vendored dir: " + strings.Join(extra, ", ")})
 			bad++
 		default:
 			results = append(results, result{name, "ok", ""})
+			verified++
 		}
 	}
 
@@ -106,11 +112,17 @@ func cmdVerify(p config.Paths, args []string) error {
 	if bad > 0 {
 		return fmt.Errorf("verify failed: %d problem(s)", bad)
 	}
-	fmt.Printf("verified %d tool(s): vendored source matches pins\n", len(names))
+	// Count only vendored tools actually hashed — not external (mise) tools,
+	// which carry no vendored source to match against a pin.
+	fmt.Printf("verified %d tool(s): vendored source matches pins\n", verified)
 	return nil
 }
 
-// vendoredOrphans returns vendored tool dirs that have no entry in the lockfile.
+// vendoredOrphans returns entries under .smith/tools/ that have no entry in the
+// lockfile — unpinned tool dirs AND stray plain files (e.g. an executable
+// dropped directly under tools/, which sits outside any pinned tool's
+// unexpectedFiles scan). Under --frozen the tree must match the lockfile
+// exactly, so both are reported.
 func vendoredOrphans(lock ProjLock) []string {
 	entries, err := os.ReadDir(filepath.Join(smithDir, "tools"))
 	if err != nil {
@@ -122,7 +134,10 @@ func vendoredOrphans(lock ProjLock) []string {
 			if _, ok := lock.Tools[e.Name()]; !ok {
 				orphans = append(orphans, e.Name())
 			}
+			continue
 		}
+		// A non-directory entry directly under tools/ is never a pinned tool.
+		orphans = append(orphans, e.Name())
 	}
 	return orphans
 }

@@ -87,7 +87,11 @@ build_from_source() {
 download_release() {
   echo "smith: downloading release binary ($plat) from $REPO..."
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT INT TERM
+  # Clean up on exit; on an interrupt, exit explicitly (which fires the EXIT
+  # trap) so the script stops rather than continuing past the signal with $tmp
+  # already gone.
+  trap 'rm -rf "$tmp"' EXIT
+  trap 'exit 130' INT TERM
   if [ "$VERSION" = latest ]; then
     base="https://github.com/$REPO/releases/latest/download"
   else
@@ -133,20 +137,23 @@ download_release() {
   # exact fail-open we want to avoid.
   if [ "$got_sums" = 1 ]; then
     verify_checksum "$tmp/smith-$plat" "$tmp/SHA256SUMS" "smith-$plat" || exit 1
+    # Verify the skill too, BEFORE installing anything: if either asset fails
+    # its checksum we abort with nothing installed, rather than dropping the
+    # binary in place and only then discovering the skill is bad (a half-done
+    # install that skips the post-install steps).
+    if [ "$got_skill" = 1 ]; then
+      verify_checksum "$tmp/cli-creator-SKILL.md" "$tmp/SHA256SUMS" "cli-creator-SKILL.md" || exit 1
+    fi
   elif [ "${SMITH_ALLOW_UNVERIFIED:-0}" = 1 ]; then
     echo "smith: WARNING: release has no SHA256SUMS; installing UNVERIFIED (SMITH_ALLOW_UNVERIFIED=1)" >&2
   else
     echo "smith: release has no SHA256SUMS asset — refusing to install unverified (set SMITH_ALLOW_UNVERIFIED=1 to override)" >&2
     exit 1
   fi
-  install -m 0755 "$tmp/smith-$plat" "$dest"
 
-  # The skill is agent-loaded, so it gets the same treatment: verified against
-  # SHA256SUMS when present, and only reported as installed if it actually was.
+  # All present assets are verified; now install.
+  install -m 0755 "$tmp/smith-$plat" "$dest"
   if [ "$got_skill" = 1 ]; then
-    if [ "$got_sums" = 1 ]; then
-      verify_checksum "$tmp/cli-creator-SKILL.md" "$tmp/SHA256SUMS" "cli-creator-SKILL.md" || exit 1
-    fi
     install -m 0644 "$tmp/cli-creator-SKILL.md" "$skill_dst"
     skill_installed=1
   fi

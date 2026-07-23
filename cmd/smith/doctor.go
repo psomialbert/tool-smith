@@ -70,25 +70,24 @@ func runDoctor(dc docCtx, checks []check, doFix bool) []finding {
 		}
 		fs := c.diagnose(dc)
 		if doFix && c.apply != nil && anyFixable(fs) {
-			if err := c.apply(dc); err != nil {
-				for i := range fs {
-					if fs[i].Severity != sevOK {
-						fs[i].Severity = sevERROR
-						fs[i].Message += " (fix failed: " + err.Error() + ")"
-					}
-				}
-			} else {
-				// Re-diagnose to confirm. Mark "(fixed)" only where a finding
-				// actually transitioned non-OK -> OK: a repair that silently
-				// didn't take stays visibly non-OK, and a finding that was OK
-				// all along isn't relabelled. diagnose is deterministic over
-				// the same context, so index i is the same subject before/after.
-				before := fs
-				fs = c.diagnose(dc)
-				for i := range fs {
-					if fs[i].Severity == sevOK && i < len(before) && before[i].Severity != sevOK {
-						fs[i].Fixed = true
-					}
+			applyErr := c.apply(dc)
+			// Re-diagnose regardless of the apply outcome: a check whose apply
+			// is a loop (e.g. `installed`) can fix earlier subjects and then fail
+			// on a later one. Re-diagnosing lets each subject report its real
+			// post-fix state — a subject that got fixed shows "(fixed)", not
+			// "(fix failed: …)" borrowed from an unrelated sibling's error.
+			// diagnose is deterministic over the same context, so index i is the
+			// same subject before/after.
+			before := fs
+			fs = c.diagnose(dc)
+			for i := range fs {
+				switch {
+				case fs[i].Severity == sevOK && i < len(before) && before[i].Severity != sevOK:
+					fs[i].Fixed = true
+				case applyErr != nil && fs[i].Severity != sevOK:
+					// Still broken after a failed apply: attribute the error here.
+					fs[i].Severity = sevERROR
+					fs[i].Message += " (fix failed: " + applyErr.Error() + ")"
 				}
 			}
 		}
@@ -266,8 +265,13 @@ func doctorChecks() []check {
 		{
 			name: "v1-home-cruft", scope: scopeMachine,
 			diagnose: func(dc docCtx) []finding {
-				present, keys := diagnoseV1Home(dc.p)
+				present, keys, derr := diagnoseV1Home(dc.p)
 				f := finding{Check: "v1-home-cruft", Scope: scopeMachine}
+				if derr != nil {
+					f.Severity = sevERROR
+					f.Message = "cannot read SMITH_HOME config.yaml: " + derr.Error()
+					return []finding{f}
+				}
 				if len(present) == 0 && len(keys) == 0 {
 					f.Severity = sevOK
 					f.Message = "no retired v1 files in SMITH_HOME"
@@ -378,7 +382,9 @@ func doctorChecks() []check {
 					}
 					dir := filepath.Join(dc.projectDir, smithDir, "tools", name)
 					f := finding{Check: "vendored-sha", Scope: scopeProject}
-					sum, err := bundleHash(dir, sourceFiles(t.Runtime, t.Entrypoint, name))
+					src := sourceFiles(t.Runtime, t.Entrypoint, name)
+					sum, err := bundleHash(dir, src)
+					extra, xerr := unexpectedFiles(dir, src)
 					switch {
 					case err != nil:
 						f.Severity = sevERROR
@@ -386,6 +392,16 @@ func doctorChecks() []check {
 					case sum != t.Sha256:
 						f.Severity = sevERROR
 						f.Message = name + ": vendored source sha ≠ pin"
+						f.FixHint = "smith use " + t.Source + "@" + t.Version + "  (re-vendor) or restore from git"
+					case xerr != nil:
+						f.Severity = sevERROR
+						f.Message = name + ": cannot scan vendored source: " + xerr.Error()
+					case len(extra) > 0:
+						// Un-pinned files aren't covered by the bundle hash yet can
+						// hijack execution — the same tampering `smith verify` and
+						// `smith install` reject, so doctor must flag it too.
+						f.Severity = sevERROR
+						f.Message = name + ": un-pinned files in vendored dir: " + strings.Join(extra, ", ")
 						f.FixHint = "smith use " + t.Source + "@" + t.Version + "  (re-vendor) or restore from git"
 					default:
 						f.Severity = sevOK
@@ -455,7 +471,11 @@ func doctorChecks() []check {
 					if sum != t.Sha256 {
 						return fmt.Errorf("%s: vendored source sha mismatch (pinned %s, got %s) — review %s and re-adopt", name, shortSha(t.Sha256), shortSha(sum), dir)
 					}
-					if extra := unexpectedFiles(dir, src); len(extra) > 0 {
+					extra, xerr := unexpectedFiles(dir, src)
+					if xerr != nil {
+						return fmt.Errorf("%s: scanning vendored dir: %w", name, xerr)
+					}
+					if len(extra) > 0 {
 						return fmt.Errorf("%s: un-pinned files in vendored dir: %s — review %s and re-adopt", name, strings.Join(extra, ", "), dir)
 					}
 					if err := materializeTool(dc.p, name, t, binDir, absBin); err != nil {

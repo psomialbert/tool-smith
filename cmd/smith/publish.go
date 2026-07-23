@@ -70,6 +70,13 @@ func cmdPublish(p config.Paths, args []string) error {
 		if err := runGit("git", "tag", tag); err != nil {
 			return fmt.Errorf("git tag %s: %w", tag, err)
 		}
+	} else if !tagAtHead(tag) {
+		// The tag already exists but points at an older commit — a re-publish
+		// where the version wasn't bumped. `git tag` won't move it and we won't
+		// force it, so what gets pushed (and later adopted at this tag) is the
+		// OLD code, not what was just committed. Refuse rather than print a
+		// misleading "published" for stale bytes.
+		return fmt.Errorf("tag %s already exists but does not point at HEAD — bump the version in manifest.yaml (or pass --tag), so adopters at %s get the code you just committed", tag, tag)
 	}
 	if err := runGit("git", "push", "origin", tag); err != nil {
 		return fmt.Errorf("pushing tag %s: %w", tag, err)
@@ -156,6 +163,20 @@ func gitTagExists(tag string) bool {
 	return exec.Command("git", "rev-parse", "-q", "--verify", "refs/tags/"+tag).Run() == nil
 }
 
+// tagAtHead reports whether tag resolves to the same commit as HEAD (so a
+// re-publish at an unchanged version is distinguishable from a stale tag).
+func tagAtHead(tag string) bool {
+	tagRev, err := exec.Command("git", "rev-list", "-n", "1", "refs/tags/"+tag).Output()
+	if err != nil {
+		return false
+	}
+	headRev, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(tagRev)) == strings.TrimSpace(string(headRev))
+}
+
 func ghUser() (string, error) {
 	out, err := exec.Command("gh", "api", "user", "--jq", ".login").Output()
 	if err != nil {
@@ -170,12 +191,28 @@ func originGitHubSlug() string {
 	if err != nil {
 		return ""
 	}
-	url := strings.TrimSpace(string(out))
-	i := strings.Index(url, "github.com")
-	if i < 0 {
-		return ""
+	return gitHubSlugFromURL(strings.TrimSpace(string(out)))
+}
+
+// gitHubSlugFromURL extracts owner/name from a github.com remote URL, or "".
+// "github.com" must appear as a host boundary — preceded by start/"@"/"/" and
+// followed by ":" or "/" — so a look-alike host like "mygithub.company.com"
+// (which merely contains the substring "github.com") isn't mistaken for it.
+func gitHubSlugFromURL(url string) string {
+	const host = "github.com"
+	for off := 0; ; {
+		rel := strings.Index(url[off:], host)
+		if rel < 0 {
+			return ""
+		}
+		i := off + rel
+		before := i == 0 || url[i-1] == '@' || url[i-1] == '/'
+		end := i + len(host)
+		after := end < len(url) && (url[end] == ':' || url[end] == '/')
+		if before && after {
+			slug := strings.TrimLeft(url[end:], ":/")
+			return strings.TrimSuffix(slug, ".git")
+		}
+		off = i + 1
 	}
-	slug := url[i+len("github.com"):]
-	slug = strings.TrimLeft(slug, ":/")
-	return strings.TrimSuffix(slug, ".git")
 }

@@ -85,14 +85,17 @@ func TestUnexpectedFiles(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644)
 	}
 	expected := []string{"tool.py", "manifest.yaml", "selftest.sh", "SKILL.md"}
-	if extra := unexpectedFiles(dir, expected); len(extra) != 0 {
-		t.Fatalf("clean dir flagged extras: %v", extra)
+	if extra, err := unexpectedFiles(dir, expected); err != nil || len(extra) != 0 {
+		t.Fatalf("clean dir flagged extras: %v (err %v)", extra, err)
 	}
 	// A shadowing module dropped next to the entrypoint must be detected.
 	os.WriteFile(filepath.Join(dir, "requests.py"), []byte("import os"), 0o644)
 	os.MkdirAll(filepath.Join(dir, "pkg"), 0o755)
 	os.WriteFile(filepath.Join(dir, "pkg", "sneaky.py"), []byte("x"), 0o644)
-	extra := unexpectedFiles(dir, expected)
+	extra, err := unexpectedFiles(dir, expected)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(extra) != 2 || extra[0] != "pkg/sneaky.py" || extra[1] != "requests.py" {
 		t.Fatalf("expected [pkg/sneaky.py requests.py], got %v", extra)
 	}

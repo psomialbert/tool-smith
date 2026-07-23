@@ -111,7 +111,8 @@ Usage:
                                  read a tool's source (interactive TUI) before adopting
   smith install                  realize .smith/tools.yaml onto the project PATH
   smith upgrade [tool][@<ver>] [--json]  re-pin adopted tool(s) to a newer version
-                                 (no arg = all → latest); self-tested, then install
+                                 (no arg = all → latest); self-tests + re-pins,
+                                 then run smith install
   smith diff <tool>[@<ver>] [--stat|--json]  preview an upgrade's source changes
   smith verify [--frozen] [--json]  re-hash vendored source vs pins (CI integrity
                                  gate); --frozen also fails on un-pinned dirs
@@ -179,18 +180,34 @@ func cmdNew(p config.Paths, args []string) error {
 	if name == "" {
 		return fmt.Errorf("usage: smith new <name> [--runtime bash|python|go|python-uv] [--desc <text>]")
 	}
-	if strings.ContainsAny(name, "/@ ") {
-		return fmt.Errorf("tool name must be a plain identifier (no /, @, spaces)")
+	// The name becomes a directory and (post-adoption) a vendored-tool + skill
+	// dir joined into filesystem paths, so hold it to the same identifier rule
+	// the adoption boundary enforces (no separators, no leading dot/dash, no
+	// control bytes) rather than a looser ad-hoc check.
+	if !scaffold.ValidToolName(name) {
+		return fmt.Errorf("tool name %q must be a plain identifier: start alphanumeric, then [A-Za-z0-9._-] (no /, @, spaces, or leading . / -)", name)
 	}
 	d := *desc
 	if d == "" {
 		d = "TODO: describe " + name
 	}
+	// desc is rendered into generated source (a string literal) and SKILL.md
+	// frontmatter; a newline or control byte would corrupt both.
+	if strings.ContainsAny(d, "\n\r") || hasControl(d) {
+		return fmt.Errorf("--desc must be a single line without control characters")
+	}
 	dir := name // scaffold into ./<name>, ready to become a git repo
-	if err := scaffold.Create(dir, scaffold.Manifest{
-		Name: name, Version: "0.1.0", Description: d, Runtime: *runtime,
-	}); err != nil {
+	m := scaffold.Manifest{Name: name, Version: "0.1.0", Description: d, Runtime: *runtime}
+	if err := scaffold.Create(dir, m); err != nil {
 		return err
+	}
+	// The source file to implement is runtime-specific: go → main.go,
+	// python-uv → <name>.py, interpreted runtimes → the entrypoint (<name>).
+	// scaffold.Create sets Entrypoint = name, so mirror it for accuracy.
+	m.Entrypoint = name
+	srcFile := scaffold.SourceFile(m)
+	if srcFile == "" {
+		srcFile = name
 	}
 	fmt.Printf("scaffolded tool: %s/\n", dir)
 	fmt.Printf(`next steps:
@@ -201,8 +218,18 @@ func cmdNew(p config.Paths, args []string) error {
      — or do it by hand: git init && git add -A && git commit -m "%s v0.1.0" && git tag v0.1.0,
        then push to a repo and topic-tag it "smith-tool"
   3. adopt it:  smith use <repo-or-path>@v0.1.0   (from a project)
-`, dir, name, dir, name)
+`, dir, srcFile, dir, name)
 	return nil
+}
+
+// hasControl reports whether s contains a C0/C1 control byte or DEL.
+func hasControl(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------- list
@@ -259,6 +286,11 @@ func cmdAllowlist(p config.Paths, args []string) error {
 			return allowlistSign(args[1:])
 		case "verify":
 			return allowlistVerify(p)
+		default:
+			// An unrecognized subcommand (likely a typo like `allowlist verfy`)
+			// must error, not silently fall through to printing the policy — a
+			// user who typo'd `sign`/`verify` would otherwise think it ran.
+			return fmt.Errorf("unknown allowlist subcommand %q (want: keygen | sign | verify, or no argument to show the policy)", args[0])
 		}
 	}
 	fc, err := p.LoadFileConfig()
@@ -654,10 +686,15 @@ func activationState(projectDir, binDir string) string {
 	}
 	text := string(raw)
 	// Match the exact quoted path the writer emits (`_.path = ["<binDir>"]`),
-	// not a bare substring — else ".smith/bin-old" or a commented-out path
-	// masks a broken activation.
-	if strings.Contains(text, fmt.Sprintf("%q", binDir)) {
-		return "ok"
+	// not a bare substring — else ".smith/bin-old" masks a broken activation.
+	// Scan line by line and ignore comments, so a commented-out `_.path` (e.g.
+	// left while the user debugs with their own path) doesn't read as "ok" and
+	// suppress the heal.
+	quoted := fmt.Sprintf("%q", binDir)
+	for _, ln := range strings.Split(text, "\n") {
+		if t := strings.TrimSpace(ln); t != "" && !strings.HasPrefix(t, "#") && strings.Contains(ln, quoted) {
+			return "ok"
+		}
 	}
 	if _, ok := healStaleActivation(strings.Split(text, "\n"), ""); ok {
 		return "stale"
@@ -680,8 +717,17 @@ func ensureActivation(projectDir, binDir string) error {
 	case "missing":
 		return os.WriteFile(path, []byte("# managed by smith: puts adopted tools on PATH\n[env]\n"+pathLine+"\n"), 0o644)
 	case "stale":
-		raw, _ := os.ReadFile(path)
-		lines, _ := healStaleActivation(strings.Split(string(raw), "\n"), pathLine)
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return fmt.Errorf("re-reading mise.local.toml to heal it: %w", rerr)
+		}
+		lines, healed := healStaleActivation(strings.Split(string(raw), "\n"), pathLine)
+		if !healed {
+			// The file changed between diagnosis and now (raced), or has no
+			// _.path line to rewrite — don't write back a truncated/empty file
+			// and don't claim a heal that didn't happen.
+			return fmt.Errorf("mise.local.toml changed while healing; re-run `smith install`")
+		}
 		fmt.Fprintf(os.Stderr, "[smith] healed stale activation in mise.local.toml → %s\n", binDir)
 		return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
 	case "foreign":
