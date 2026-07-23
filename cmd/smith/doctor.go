@@ -339,6 +339,9 @@ func doctorChecks() []check {
 				var out []finding
 				for _, name := range names {
 					t := dc.lock.Tools[name]
+					if t.isMise() {
+						continue // external tool: no vendored source to hash
+					}
 					dir := filepath.Join(dc.projectDir, smithDir, "tools", name)
 					f := finding{Check: "vendored-sha", Scope: scopeProject}
 					sum, err := bundleHash(dir, sourceFiles(t.Runtime, t.Entrypoint, name))
@@ -370,6 +373,9 @@ func doctorChecks() []check {
 				binDir := filepath.Join(dc.projectDir, smithDir, "bin")
 				var out []finding
 				for _, name := range names {
+					if dc.lock.Tools[name].isMise() {
+						continue // external tool: on PATH via mise, not .smith/bin
+					}
 					f := finding{Check: "installed", Scope: scopeProject}
 					if _, err := os.Lstat(filepath.Join(binDir, name)); err == nil {
 						f.Severity = sevOK
@@ -394,6 +400,9 @@ func doctorChecks() []check {
 					return err
 				}
 				for _, name := range sortedToolNames(dc.lock) {
+					if dc.lock.Tools[name].isMise() {
+						continue // external: fetched via mise, not materialized
+					}
 					if _, err := os.Lstat(filepath.Join(binDir, name)); err == nil {
 						continue
 					}

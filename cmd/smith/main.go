@@ -101,6 +101,9 @@ Usage:
   smith use <repo|path>[@<ver>]  adopt a tool into this project: sandboxed
                                  self-test, vendor into .smith/tools/, pin in
                                  .smith/tools.yaml (a reviewable commit)
+  smith use --mise <spec>[@<ver>]  adopt a third-party CLI via mise (e.g.
+                                 ubi:DataDog/pup): pin in mise.toml, no source
+                                 vendored (external, reviewable pin)
   smith review <repo|path|name> [--plain|--edit|--paths] [--editor <cmd>]
                                  read a tool's source (interactive TUI) before adopting
   smith install                  realize .smith/tools.yaml onto the project PATH
@@ -215,7 +218,10 @@ func cmdList(p config.Paths, args []string) error {
 		fmt.Println("no tools adopted in this project; try `smith use <repo>` or `smith search`")
 		return nil
 	}
-	installed := func(n string) string {
+	status := func(n string, t ProjTool) string {
+		if t.isMise() {
+			return "external (mise)"
+		}
 		if _, err := os.Lstat(filepath.Join(smithDir, "bin", n)); err == nil {
 			return "on PATH"
 		}
@@ -224,7 +230,7 @@ func cmdList(p config.Paths, args []string) error {
 	fmt.Printf("%-16s %-10s %-10s %s\n", "TOOL", "VERSION", "RUNTIME", "STATUS")
 	for _, n := range names {
 		t := lock.Tools[n]
-		fmt.Printf("%-16s %-10s %-10s %s\n", n, t.Version, t.Runtime, installed(n))
+		fmt.Printf("%-16s %-10s %-10s %s\n", n, t.Version, t.Runtime, status(n, t))
 	}
 	return nil
 }
