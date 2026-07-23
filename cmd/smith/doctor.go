@@ -345,7 +345,7 @@ func doctorChecks() []check {
 				}
 				return []finding{f}
 			},
-			apply: func(dc docCtx) error { ensureProjectGitignore(); return nil },
+			apply: func(dc docCtx) error { return ensureProjectGitignore() },
 		},
 		{
 			name: "tracked-mise-local", scope: scopeProject,
@@ -411,7 +411,10 @@ func doctorChecks() []check {
 						continue // external tool: on PATH via mise, not .smith/bin
 					}
 					f := finding{Check: "installed", Scope: scopeProject}
-					if _, err := os.Lstat(filepath.Join(binDir, name)); err == nil {
+					// Stat (not Lstat): a dangling symlink (e.g. from an upgrade
+					// that renamed the entrypoint) must read as broken, not "on
+					// PATH", so --fix re-materializes it.
+					if _, err := os.Stat(filepath.Join(binDir, name)); err == nil {
 						f.Severity = sevOK
 						f.Message = name + ": on PATH"
 					} else {
@@ -438,7 +441,7 @@ func doctorChecks() []check {
 					if t.isMise() {
 						continue // external: fetched via mise, not materialized
 					}
-					if _, err := os.Lstat(filepath.Join(binDir, name)); err == nil {
+					if _, err := os.Stat(filepath.Join(binDir, name)); err == nil {
 						continue
 					}
 					// Same integrity gate as `smith install`: never build/put on

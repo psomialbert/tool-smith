@@ -126,6 +126,7 @@ Usage:
                                  health; --fix repairs safe issues (activation,
                                  gitignore, v1 cruft)
   smith version                  print version
+  smith help                     show this help (aliases: -h, --help)
 
 Trust is per-project: a tool vendored + pinned in the reviewed .smith/tools.yaml
 is trusted for that project (on PATH via mise). Until adopted, tools run only
@@ -232,7 +233,9 @@ func cmdList(p config.Paths, args []string) error {
 		if t.isMise() {
 			return "external (mise)"
 		}
-		if _, err := os.Lstat(filepath.Join(smithDir, "bin", n)); err == nil {
+		// Stat (not Lstat) so a dangling symlink — e.g. left by an upgrade that
+		// renamed the entrypoint — reads as not-installed, not "on PATH".
+		if _, err := os.Stat(filepath.Join(smithDir, "bin", n)); err == nil {
 			return "on PATH"
 		}
 		return "not installed (run `smith install`)"
@@ -335,7 +338,9 @@ func cmdReview(p config.Paths, args []string) error {
 	files := orderForReview(entrypoint, all)
 	fmt.Printf("\nbundle (%d files):\n", len(files))
 	for _, f := range files {
-		fmt.Printf("  %s\n", f)
+		// File names come from a walk of the untrusted clone; a name with
+		// embedded escapes could rewrite the reviewer's screen, so sanitize.
+		fmt.Printf("  %s\n", sanitizeForDisplay(f))
 	}
 
 	fc, _ := p.LoadFileConfig()
@@ -415,7 +420,7 @@ func resolveReviewTarget(arg string) (base string, cleanup func(), label string,
 		return "", cleanup, "", cerr
 	}
 	if ver != "" {
-		co := exec.Command("git", "-C", clone, "checkout", "--quiet", ver)
+		co := exec.Command("git", "-C", clone, "checkout", "--quiet", "--end-of-options", ver)
 		co.Stderr = os.Stderr
 		if cerr := co.Run(); cerr != nil {
 			return "", cleanup, "", fmt.Errorf("checkout %s: %w", ver, cerr)
@@ -458,9 +463,13 @@ func loadReviewFiles(base string, files []string) ([]reviewtui.File, error) {
 		if err != nil {
 			return nil, err
 		}
+		// The name is rendered raw into the TUI header and the pasteable report;
+		// sanitize it so an escape-laden filename from the untrusted clone can't
+		// smuggle terminal control sequences past the reviewer.
+		name := sanitizeForDisplay(rel)
 		if isBinary(data) {
 			sum := sha256.Sum256(data)
-			rf = append(rf, reviewtui.File{Name: rel, Lang: "generic",
+			rf = append(rf, reviewtui.File{Name: name, Lang: "generic",
 				Lines: []string{fmt.Sprintf("(binary file, %d bytes, sha256=%s)", len(data), hex.EncodeToString(sum[:])[:16])}})
 			continue
 		}
@@ -472,7 +481,7 @@ func loadReviewFiles(base string, files []string) ([]reviewtui.File, error) {
 		for i := range lines {
 			lines[i] = sanitizeForDisplay(lines[i])
 		}
-		rf = append(rf, reviewtui.File{Name: rel, Lang: reviewtui.LangFor(rel, first), Lines: lines})
+		rf = append(rf, reviewtui.File{Name: name, Lang: reviewtui.LangFor(rel, first), Lines: lines})
 	}
 	return rf, nil
 }
@@ -538,15 +547,21 @@ func orderForReview(entrypoint string, all []string) []string {
 func bundleFiles(base string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
 			return err
 		}
-		if strings.Contains(path, string(filepath.Separator)+".git"+string(filepath.Separator)) {
-			return nil
-		}
+		// Skip the git metadata dir. Check the path relative to base by
+		// component, so this also matches when base is "." (where the walked
+		// path is ".git/..." with no leading separator to key off).
 		rel, rerr := filepath.Rel(base, path)
 		if rerr != nil {
 			return rerr
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		out = append(out, rel)
 		return nil
@@ -561,7 +576,7 @@ func printInline(base string, files []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("\n===== %s =====\n", f)
+		fmt.Printf("\n===== %s =====\n", sanitizeForDisplay(f))
 		if isBinary(data) {
 			sum := sha256.Sum256(data)
 			fmt.Printf("(binary, %d bytes, sha256=%s)\n", len(data), hex.EncodeToString(sum[:])[:16])
@@ -727,7 +742,10 @@ func runSelfTest(p config.Paths, dir, entry string, perms sandbox.Perms) error {
 		return err
 	}
 	defer os.RemoveAll(work)
-	argv, err := sandbox.Command(p.SandboxProfiles, work, perms, []string{"/bin/bash", st, entry})
+	// The self-test runs from an empty scratch workdir but reads selftest.sh and
+	// the entrypoint out of the clone dir; make that dir readable in the sandbox
+	// (on Linux it'd otherwise be masked by the tmpfs over /tmp).
+	argv, err := sandbox.Command(p.SandboxProfiles, work, perms, []string{"/bin/bash", st, entry}, dir)
 	if err != nil {
 		return err
 	}

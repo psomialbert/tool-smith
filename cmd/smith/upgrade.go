@@ -124,9 +124,19 @@ func cmdUpgrade(p config.Paths, args []string) error {
 	var upgraded []upEntry
 	var uptodate []string
 	var failed []failEntry
+	var skippedExternal []string
 
 	for _, name := range names {
 		t := lock.Tools[name]
+		if t.isMise() {
+			// External tool: pinned in mise.toml, no vendored source to re-clone.
+			// Skip it in the bulk sweep; if explicitly targeted, say how.
+			if targetName != "" {
+				return fmt.Errorf("%q is an external (mise) tool — upgrade it with `mise use %s@<ver>`, then `smith install`", name, strings.TrimPrefix(t.Source, "mise:"))
+			}
+			skippedExternal = append(skippedExternal, name)
+			continue
+		}
 		want := targetVer
 		if want == "" {
 			latest, lerr := latestTag(t.Source)
@@ -156,6 +166,7 @@ func cmdUpgrade(p config.Paths, args []string) error {
 	if *asJSON {
 		if err := jsonPrint(map[string]any{
 			"upgraded": upgraded, "uptodate": uptodate, "failed": failed,
+			"skipped_external": skippedExternal,
 		}); err != nil {
 			return err
 		}
@@ -175,6 +186,9 @@ func cmdUpgrade(p config.Paths, args []string) error {
 	}
 	for _, n := range uptodate {
 		fmt.Printf("up to date: %s (%s)\n", n, lock.Tools[n].Version)
+	}
+	for _, n := range skippedExternal {
+		fmt.Printf("skipped (external, via mise): %s — `mise upgrade %s`\n", n, strings.TrimPrefix(lock.Tools[n].Source, "mise:"))
 	}
 	for _, f := range failed {
 		fmt.Fprintf(os.Stderr, "failed: %s — %s\n", f.Tool, f.Error)
@@ -215,6 +229,9 @@ func cmdDiff(p config.Paths, args []string) error {
 	if !ok {
 		return fmt.Errorf("%q is not adopted in this project (see `smith list`)", name)
 	}
+	if t.isMise() {
+		return fmt.Errorf("%q is an external (mise) tool — no source is vendored to diff", name)
+	}
 	if ver == "" {
 		latest, lerr := latestTag(t.Source)
 		if lerr != nil {
@@ -238,7 +255,7 @@ func cmdDiff(p config.Paths, args []string) error {
 	if err := gitClone(t.Source, clone); err != nil {
 		return err
 	}
-	co := exec.Command("git", "-C", clone, "checkout", "--quiet", ver)
+	co := exec.Command("git", "-C", clone, "checkout", "--quiet", "--end-of-options", ver)
 	co.Stderr = os.Stderr
 	if err := co.Run(); err != nil {
 		return fmt.Errorf("checkout %s: %w", ver, err)

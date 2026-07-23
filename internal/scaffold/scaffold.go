@@ -169,5 +169,27 @@ func LoadManifest(dir string) (Manifest, error) {
 	if !filepath.IsLocal(m.Entrypoint) {
 		return Manifest{}, fmt.Errorf("manifest entrypoint %q must be a relative path inside the repo (no .. or leading /)", m.Entrypoint)
 	}
+	// Version and runtime are printed into the reviewer's terminal (the review
+	// header, the TUI header, the capability summary) before any code is read.
+	// A hostile repo could embed terminal escape sequences in them to hide or
+	// forge output — the exact thing the review step exists to prevent — so
+	// reject any control bytes here, at the parse boundary.
+	if hasControlBytes(m.Version) {
+		return Manifest{}, fmt.Errorf("manifest version contains control characters")
+	}
+	if hasControlBytes(m.Runtime) {
+		return Manifest{}, fmt.Errorf("manifest runtime contains control characters")
+	}
 	return m, nil
+}
+
+// hasControlBytes reports whether s contains any C0/C1 control character or DEL
+// — bytes a terminal may act on as escape/cursor-control sequences.
+func hasControlBytes(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return true
+		}
+	}
+	return false
 }
