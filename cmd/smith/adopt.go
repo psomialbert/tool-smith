@@ -208,6 +208,14 @@ func expandSource(s string) string {
 func allowlistPatterns(fc config.FileConfig) ([]string, error) {
 	pats := append([]string(nil), fc.Allowlist.Repos...)
 	if fc.Allowlist.File != "" {
+		// Tamper-evidence: if a public key is configured, the allowlist file
+		// MUST carry a valid signature — else fail closed (block adoptions),
+		// so a machine's config can't silently point at a widened list.
+		if fc.Allowlist.PublicKey != "" {
+			if err := verifyAllowlistSig(fc.Allowlist.File, fc.Allowlist.PublicKey); err != nil {
+				return nil, fmt.Errorf("allowlist signature check failed — adoptions blocked: %w", err)
+			}
+		}
 		raw, err := os.ReadFile(fc.Allowlist.File)
 		if err != nil {
 			return nil, fmt.Errorf("reading allowlist file %s: %w", fc.Allowlist.File, err)

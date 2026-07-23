@@ -54,8 +54,9 @@ type FileConfig struct {
 }
 
 type AllowlistConfig struct {
-	Repos []string `yaml:"repos,omitempty"` // glob patterns, e.g. "github.com/acme/*"
-	File  string   `yaml:"file,omitempty"`  // path to a file of patterns (one per line)
+	Repos     []string `yaml:"repos,omitempty"`      // glob patterns, e.g. "github.com/acme/*"
+	File      string   `yaml:"file,omitempty"`       // path to a file of patterns (one per line)
+	PublicKey string   `yaml:"public_key,omitempty"` // base64 ed25519 key; when set, File must carry a valid <file>.sig
 }
 
 type SkillsConfig struct {
