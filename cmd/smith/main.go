@@ -100,29 +100,31 @@ Usage:
                                  from a tool dir: git + create/push repo, tag,
                                  topic-tag smith-tool (make it adoptable)
   smith search [query]           discover tool repos (GitHub topic: smith-tool)
-  smith use <repo|path>[@<ver>]  adopt a tool into this project: sandboxed
+  smith use <repo|path>[@<ver>] [--version <v>]
+                                 adopt a tool into this project: sandboxed
                                  self-test, vendor into .smith/tools/, pin in
                                  .smith/tools.yaml (a reviewable commit)
   smith use --mise <spec>[@<ver>]  adopt a third-party CLI via mise (e.g.
                                  ubi:DataDog/pup): pin in mise.toml, no source
                                  vendored (external, reviewable pin)
-  smith review <repo|path|name> [--plain|--edit|--paths] [--editor <cmd>]
+  smith review <repo|path|name> [--inline|--plain|--edit|--paths] [--editor <cmd>]
                                  read a tool's source (interactive TUI) before adopting
   smith install                  realize .smith/tools.yaml onto the project PATH
-  smith upgrade [tool][@<ver>]   re-pin adopted tool(s) to a newer version (no
-                                 arg = all → latest); self-tested, then install
-  smith diff <tool>[@<ver>]      preview the source changes an upgrade would make
+  smith upgrade [tool][@<ver>] [--json]  re-pin adopted tool(s) to a newer version
+                                 (no arg = all → latest); self-tested, then install
+  smith diff <tool>[@<ver>] [--stat|--json]  preview an upgrade's source changes
   smith verify [--frozen] [--json]  re-hash vendored source vs pins (CI integrity
                                  gate); --frozen also fails on un-pinned dirs
   smith lens [--json]            agent-facing index of this project's tools
                                  (triggers + how to invoke); run to see the toolbox
-  smith list                     list tools adopted in this project
+  smith list [--json]            list tools adopted in this project (alias: status)
   smith allowlist [keygen|sign <file>|verify]  show the org adoption policy;
                                  subcommands manage an ed25519-signed allowlist
   smith migrate                  clean up retired v1 files in SMITH_HOME
                                  (backs them up first; safe to re-run)
-  smith doctor [--fix] [--json]  diagnose machine + project health; --fix repairs
-                                 safe issues (activation, gitignore, v1 cruft)
+  smith doctor [--fix] [--json] [--machine|--project]  diagnose machine + project
+                                 health; --fix repairs safe issues (activation,
+                                 gitignore, v1 cruft)
   smith version                  print version
 
 Trust is per-project: a tool vendored + pinned in the reviewed .smith/tools.yaml
@@ -192,9 +194,12 @@ func cmdNew(p config.Paths, args []string) error {
 	fmt.Printf("scaffolded tool: %s/\n", dir)
 	fmt.Printf(`next steps:
   1. implement %s/%s and its selftest.sh; sharpen SKILL.md's trigger
-  2. make it a repo:  cd %s && git init && git add -A && git commit -m "%s v0.1.0" && git tag v0.1.0
-  3. publish it (own repo / org repo / embed in a project) and topic-tag it "smith-tool"
-  4. adopt it:  smith use <repo-or-path>@v0.1.0   (from a project)
+  2. publish it:  cd %s && smith publish (--public|--private)
+     (inits the repo, commits, tags v0.1.0, creates/pushes the GitHub repo, and
+     topic-tags it "smith-tool" so `+"`smith search`"+` can find it)
+     — or do it by hand: git init && git add -A && git commit -m "%s v0.1.0" && git tag v0.1.0,
+       then push to a repo and topic-tag it "smith-tool"
+  3. adopt it:  smith use <repo-or-path>@v0.1.0   (from a project)
 `, dir, name, dir, name)
 	return nil
 }
@@ -324,6 +329,9 @@ func cmdReview(p config.Paths, args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(all) == 0 {
+		return fmt.Errorf("nothing to review: %s has no files (empty repo?)", base)
+	}
 	files := orderForReview(entrypoint, all)
 	fmt.Printf("\nbundle (%d files):\n", len(files))
 	for _, f := range files {
@@ -403,10 +411,8 @@ func resolveReviewTarget(arg string) (base string, cleanup func(), label string,
 			src, ver = arg[:at], arg[at+1:]
 		}
 	}
-	cc := exec.Command("git", "clone", "--quiet", expandSource(src), clone)
-	cc.Stderr = os.Stderr
-	if cerr := cc.Run(); cerr != nil {
-		return "", cleanup, "", fmt.Errorf("cloning %s: %w", src, cerr)
+	if cerr := gitClone(expandSource(src), clone); cerr != nil {
+		return "", cleanup, "", cerr
 	}
 	if ver != "" {
 		co := exec.Command("git", "-C", clone, "checkout", "--quiet", ver)
@@ -463,9 +469,45 @@ func loadReviewFiles(base string, files []string) ([]reviewtui.File, error) {
 		if len(lines) > 0 {
 			first = lines[0]
 		}
+		for i := range lines {
+			lines[i] = sanitizeForDisplay(lines[i])
+		}
 		rf = append(rf, reviewtui.File{Name: rel, Lang: reviewtui.LangFor(rel, first), Lines: lines})
 	}
 	return rf, nil
+}
+
+// sanitizeForDisplay makes one line of untrusted tool source safe to print to a
+// terminal: it expands tabs to 4-column stops and renders control bytes in
+// visible caret/hex notation (ESC -> "^[", CR -> "^M", C1 -> "\x9b", ...). A
+// malicious tool could otherwise embed cursor-move / erase / conceal escape
+// sequences that hide lines from the human reviewer — the exact thing the
+// review step exists to prevent. Newlines are already split out by the caller.
+func sanitizeForDisplay(s string) string {
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			n := 4 - col%4
+			b.WriteString(strings.Repeat(" ", n))
+			col += n
+		case r == 0x7f:
+			b.WriteString("^?")
+			col += 2
+		case r < 0x20:
+			b.WriteByte('^')
+			b.WriteByte(byte(r) ^ 0x40)
+			col += 2
+		case r >= 0x80 && r <= 0x9f: // C1 controls some terminals still act on
+			fmt.Fprintf(&b, "\\x%02x", r)
+			col += 4
+		default:
+			b.WriteRune(r)
+			col++
+		}
+	}
+	return b.String()
 }
 
 // orderForReview puts source first: the entrypoint, then selftest.sh, then the
@@ -525,9 +567,10 @@ func printInline(base string, files []string) error {
 			fmt.Printf("(binary, %d bytes, sha256=%s)\n", len(data), hex.EncodeToString(sum[:])[:16])
 			continue
 		}
-		os.Stdout.Write(data)
-		if len(data) > 0 && data[len(data)-1] != '\n' {
-			fmt.Println()
+		// Sanitize per line: untrusted source must not smuggle terminal escape
+		// sequences into the reviewer's screen (same reason as the TUI path).
+		for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			fmt.Println(sanitizeForDisplay(line))
 		}
 	}
 	return nil
@@ -595,7 +638,10 @@ func activationState(projectDir, binDir string) string {
 		return "foreign" // unreadable: refuse to touch
 	}
 	text := string(raw)
-	if strings.Contains(text, binDir) {
+	// Match the exact quoted path the writer emits (`_.path = ["<binDir>"]`),
+	// not a bare substring — else ".smith/bin-old" or a commented-out path
+	// masks a broken activation.
+	if strings.Contains(text, fmt.Sprintf("%q", binDir)) {
 		return "ok"
 	}
 	if _, ok := healStaleActivation(strings.Split(text, "\n"), ""); ok {
@@ -687,10 +733,12 @@ func runSelfTest(p config.Paths, dir, entry string, perms sandbox.Perms) error {
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = work
-	cmd.Env, err = sandbox.Env(nil)
+	env, cleanup, err := sandbox.Env(nil)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
+	cmd.Env = env
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	fmt.Fprintf(os.Stderr, "[smith] running self-test sandboxed in %s\n", work)
 	return cmd.Run()

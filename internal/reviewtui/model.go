@@ -3,6 +3,7 @@ package reviewtui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 type Mode int
@@ -146,8 +147,11 @@ func (m *Model) CancelComment() {
 func (m *Model) InputRune(r rune) { m.Input += string(r) }
 
 func (m *Model) InputBackspace() {
+	// Trim a whole rune, not a byte, so multibyte input (e.g. "å") doesn't
+	// decay into invalid UTF-8 in the comment buffer.
 	if n := len(m.Input); n > 0 {
-		m.Input = m.Input[:n-1]
+		_, size := utf8.DecodeLastRuneInString(m.Input)
+		m.Input = m.Input[:n-size]
 	}
 }
 
@@ -191,10 +195,35 @@ func (m *Model) Report() string {
 		if lang == "generic" {
 			lang = ""
 		}
-		fmt.Fprintf(&b, "```%s\n%s\n```\n", lang, strings.Join(c.Snippet, "\n"))
+		snippet := strings.Join(c.Snippet, "\n")
+		// Use a fence longer than any backtick run in the snippet, so source
+		// that itself contains ``` can't break out of the code block in the
+		// pasteable report (CommonMark: a fence must exceed inner runs).
+		fence := strings.Repeat("`", maxBacktickRun(snippet)+1)
+		if len(fence) < 3 {
+			fence = "```"
+		}
+		fmt.Fprintf(&b, "%s%s\n%s\n%s\n", fence, lang, snippet, fence)
 		fmt.Fprintf(&b, "%s\n", c.Text)
 	}
 	return b.String()
+}
+
+// maxBacktickRun returns the length of the longest run of consecutive
+// backticks in s (0 if none).
+func maxBacktickRun(s string) int {
+	max, cur := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			cur++
+			if cur > max {
+				max = cur
+			}
+		} else {
+			cur = 0
+		}
+	}
+	return max
 }
 
 func plural(n int) string {

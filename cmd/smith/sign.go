@@ -16,13 +16,21 @@ import (
 // at <file>.sig against the base64 public key. Any problem (bad key, missing or
 // invalid signature) is an error — callers fail closed.
 func verifyAllowlistSig(file, pubB64 string) error {
-	pub, err := base64.StdEncoding.DecodeString(strings.TrimSpace(pubB64))
-	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid allowlist public_key (want base64 of a 32-byte ed25519 key)")
-	}
 	data, err := os.ReadFile(file)
 	if err != nil {
 		return err
+	}
+	return verifyAllowlistData(file, data, pubB64)
+}
+
+// verifyAllowlistData verifies data (the exact bytes the caller will parse)
+// against <file>.sig and the base64 public key. Callers read the allowlist
+// once and pass those bytes here, so the verified bytes are the used bytes —
+// no verify-then-reread window an attacker could swap in between.
+func verifyAllowlistData(file string, data []byte, pubB64 string) error {
+	pub, err := base64.StdEncoding.DecodeString(strings.TrimSpace(pubB64))
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid allowlist public_key (want base64 of a 32-byte ed25519 key)")
 	}
 	sigRaw, err := os.ReadFile(file + ".sig")
 	if err != nil {

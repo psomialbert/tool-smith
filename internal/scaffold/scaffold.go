@@ -9,10 +9,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// toolNameRe matches a safe tool name: a single path element that can serve as
+// a directory and skill name — starts alphanumeric, then [A-Za-z0-9._-]. It
+// admits no path separator and (starting alphanumeric) no "."/".." so it can't
+// traverse when joined into a filesystem path.
+var toolNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// ValidToolName reports whether name is safe to use as a vendored-tool
+// directory and skill name. The adoption path feeds an untrusted manifest's
+// name straight into filesystem paths, so this is a security boundary, not a
+// style check.
+func ValidToolName(name string) bool { return toolNameRe.MatchString(name) }
 
 //go:embed templates/*
 var templates embed.FS
@@ -96,8 +109,8 @@ func Create(dir string, m Manifest) error {
 		"README.md":   {"README.md", 0o644},
 	}
 	if src := SourceFile(m); src != "" {
-		// Compiled/wrapped: source is separate; `smith register` produces the
-		// entrypoint (Go: compiled binary; python-uv: uv launcher).
+		// Compiled/wrapped: source is separate; adoption (`smith use`) produces
+		// the entrypoint (Go: compiled binary; python-uv: uv launcher).
 		files[src] = struct {
 			tpl  string
 			mode os.FileMode
@@ -146,6 +159,15 @@ func LoadManifest(dir string) (Manifest, error) {
 	}
 	if m.Name == "" || m.Version == "" || m.Entrypoint == "" {
 		return Manifest{}, fmt.Errorf("manifest.yaml must set name, version, entrypoint")
+	}
+	// Name and entrypoint from an untrusted repo are joined into host paths
+	// (vendored dir, build target) before the reviewer sees anything — reject
+	// traversal/absolute values so a hostile manifest can't escape .smith/.
+	if !ValidToolName(m.Name) {
+		return Manifest{}, fmt.Errorf("manifest name %q is not a plain identifier ([A-Za-z0-9._-], no path separators)", m.Name)
+	}
+	if !filepath.IsLocal(m.Entrypoint) {
+		return Manifest{}, fmt.Errorf("manifest entrypoint %q must be a relative path inside the repo (no .. or leading /)", m.Entrypoint)
 	}
 	return m, nil
 }

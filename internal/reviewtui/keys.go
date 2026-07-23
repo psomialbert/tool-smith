@@ -45,7 +45,7 @@ func ParseKey(r *bufio.Reader) (Key, error) {
 	case 3:
 		return Key{Kind: KeyCtrlC}, nil
 	case 0x1b:
-		// Escape: either a CSI sequence (ESC [ ...) or a bare Esc.
+		// Escape: either a CSI/SS3 sequence (ESC [ ... / ESC O ...) or a bare Esc.
 		next, _, err := r.ReadRune()
 		if err != nil {
 			return Key{Kind: KeyEsc}, nil
@@ -54,11 +54,24 @@ func ParseKey(r *bufio.Reader) (Key, error) {
 			r.UnreadRune()
 			return Key{Kind: KeyEsc}, nil
 		}
-		code, _, err := r.ReadRune()
-		if err != nil {
-			return Key{Kind: KeyEsc}, nil
+		// Consume the WHOLE sequence: parameter/intermediate bytes (digits, ';',
+		// etc.) up to and including the final byte (0x40–0x7E). This keeps a
+		// modified key like ESC [ 1 ; 5 A (Ctrl-Up) from leaving "1;5A" in the
+		// stream to be misread as printable runes typed into a comment.
+		var params []rune
+		var final rune
+		for {
+			c, _, err := r.ReadRune()
+			if err != nil {
+				return Key{Kind: KeyEsc}, nil
+			}
+			if c >= 0x40 && c <= 0x7e {
+				final = c
+				break
+			}
+			params = append(params, c)
 		}
-		switch code {
+		switch final {
 		case 'A':
 			return Key{Kind: KeyUp}, nil
 		case 'B':
@@ -71,12 +84,12 @@ func ParseKey(r *bufio.Reader) (Key, error) {
 			return Key{Kind: KeyHome}, nil
 		case 'F':
 			return Key{Kind: KeyEnd}, nil
-		case '5', '6':
+		case '~':
 			// PageUp/PageDown arrive as ESC [ 5 ~ / ESC [ 6 ~.
-			if tilde, _, err := r.ReadRune(); err == nil && tilde == '~' {
-				if code == '5' {
-					return Key{Kind: KeyPageUp}, nil
-				}
+			switch string(params) {
+			case "5":
+				return Key{Kind: KeyPageUp}, nil
+			case "6":
 				return Key{Kind: KeyPageDown}, nil
 			}
 			return Key{Kind: KeyUnknown}, nil
