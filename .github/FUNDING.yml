@@ -1,0 +1,10 @@
+# Shows a "Sponsor" button on the repo. The `github:` entry requires GitHub
+# Sponsors to be enabled for the account (github.com/sponsors/psomialbert),
+# otherwise the button won't render. Edit or remove entries as needed.
+github: [psomialbert]
+# Other supported platforms (uncomment + fill in to use):
+# patreon: your-handle
+# open_collective: your-collective
+# ko_fi: your-handle
+# tidelift: go/your-package
+# custom: ["https://example.com/donate"]
