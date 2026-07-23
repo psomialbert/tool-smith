@@ -40,8 +40,8 @@ const (
 type ProjTool struct {
 	Source     string `yaml:"source"`
 	Version    string `yaml:"version"`
-	Sha256     string `yaml:"sha256"` // hash of the vendored bundle
-	Entrypoint string `yaml:"entrypoint"`
+	Sha256     string `yaml:"sha256,omitempty"`     // hash of the vendored bundle (empty for external mise tools)
+	Entrypoint string `yaml:"entrypoint,omitempty"` // empty for external mise tools
 	Runtime    string `yaml:"runtime"`
 }
 
@@ -49,6 +49,10 @@ type ProjTool struct {
 type ProjLock struct {
 	Tools map[string]ProjTool `yaml:"tools"`
 }
+
+// isMise reports whether this is an external tool adopted via a mise backend
+// (no vendored source, no self-test) rather than a vendored smith tool.
+func (t ProjTool) isMise() bool { return t.Runtime == "mise" }
 
 func lockPath() string { return filepath.Join(smithDir, lockFileName) }
 
@@ -249,6 +253,7 @@ func allowlistPermits(pats []string, source, expanded string) bool {
 
 func cmdUse(p config.Paths, args []string) error {
 	var version string
+	var mise bool
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--version" && i+1 < len(args) {
@@ -256,12 +261,19 @@ func cmdUse(p config.Paths, args []string) error {
 			i++
 			continue
 		}
+		if args[i] == "--mise" {
+			mise = true
+			continue
+		}
 		rest = append(rest, args[i])
 	}
 	if len(rest) != 1 {
-		return fmt.Errorf("usage: smith use <repo|path>[@<version>] [--version <v>]")
+		return fmt.Errorf("usage: smith use <repo|path>[@<version>] [--version <v>]\n       smith use --mise <backend:spec>[@<version>]")
 	}
 	source := rest[0]
+	if mise {
+		return cmdUseMise(p, source, version)
+	}
 	// Allow trailing @ref when the source isn't a scheme/auth URL.
 	if version == "" && !strings.Contains(source, "://") && !strings.Contains(source, "git@") {
 		if at := strings.LastIndex(source, "@"); at > 0 {
@@ -291,6 +303,88 @@ This is a reviewable change — the tool's source is now in your project:
 then run `+"`smith install`"+` to put it on PATH for this project.
 `, smithDir)
 	return nil
+}
+
+// cmdUseMise adopts a third-party CLI via a mise backend, pinned per-project.
+// Unlike a smith tool there's no source to vendor or self-test — the reviewable
+// artifact is the mise.toml pin. smith records it in .smith/tools.yaml (runtime
+// mise) for a unified `smith list`; `smith install` runs `mise install`.
+func cmdUseMise(p config.Paths, spec, version string) error {
+	if version == "" { // trailing @ver on the spec, e.g. ubi:DataDog/pup@1.2.3
+		if at := strings.LastIndex(spec, "@"); at > 0 {
+			version, spec = spec[at+1:], spec[:at]
+		}
+	}
+	if _, err := exec.LookPath("mise"); err != nil {
+		return fmt.Errorf("mise not found on PATH (required for --mise external tools)")
+	}
+
+	// External tools are policy-gated too. Match the spec and its repo part
+	// (after the backend colon, e.g. DataDog/pup).
+	fc, _ := p.LoadFileConfig()
+	if pats, perr := allowlistPatterns(fc); perr != nil {
+		return perr
+	} else if len(pats) > 0 {
+		repo := spec
+		if i := strings.Index(spec, ":"); i >= 0 {
+			repo = spec[i+1:]
+		}
+		if !allowlistPermits(pats, spec, repo) {
+			return fmt.Errorf("adoption blocked: %q matches no allowlist pattern.\n  allowed: %s\n  (policy in %s)",
+				spec, strings.Join(pats, ", "), filepath.Join(p.Home, "config.yaml"))
+		}
+	}
+
+	// Resolve a concrete version for a reproducible pin.
+	if version == "" || version == "latest" {
+		out, err := exec.Command("mise", "latest", spec).Output()
+		if err != nil {
+			return fmt.Errorf("resolving latest %s via mise (try @<version>): %w", spec, err)
+		}
+		version = strings.TrimSpace(string(out))
+		if version == "" {
+			return fmt.Errorf("mise could not resolve a version for %s — pin an explicit @<version>", spec)
+		}
+	}
+
+	// mise writes the pin into mise.toml (committed project config) + installs it.
+	mu := exec.Command("mise", "use", spec+"@"+version)
+	mu.Stdout, mu.Stderr = os.Stderr, os.Stderr
+	if err := mu.Run(); err != nil {
+		return fmt.Errorf("mise use %s@%s: %w", spec, version, err)
+	}
+
+	lock, err := loadProjLock()
+	if err != nil {
+		return err
+	}
+	name := miseToolName(spec)
+	lock.Tools[name] = ProjTool{Source: "mise:" + spec, Version: version, Runtime: "mise"}
+	if err := saveProjLock(lock); err != nil {
+		return err
+	}
+
+	fmt.Printf("adopted %s@%s (external, via mise)\n", spec, version)
+	fmt.Printf(`  pinned in mise.toml + recorded in %s — no source vendored (external tool)
+
+This is a reviewable change — the pin lives in mise.toml + %s:
+  git add mise.toml %s && git commit    # the adoption decision, for review
+teammates run `+"`smith install`"+` to fetch it via mise.
+`, lockPath(), lockPath(), smithDir)
+	return nil
+}
+
+// miseToolName derives a list/display name from a mise spec:
+// "ubi:DataDog/pup" -> "pup", "go:github.com/x/y" -> "y", "node" -> "node".
+func miseToolName(spec string) string {
+	s := spec
+	if i := strings.Index(s, ":"); i >= 0 {
+		s = s[i+1:]
+	}
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
 }
 
 // adoptResult is what adoptAtVersion pinned.
@@ -524,8 +618,15 @@ func cmdInstall(p config.Paths, args []string) error {
 	if err != nil {
 		return err
 	}
+	miseTools := false
 	for _, name := range names {
 		t := lock.Tools[name]
+		if t.isMise() {
+			// External tool: no vendored source to verify/materialize; mise
+			// fetches it from mise.toml below.
+			miseTools = true
+			continue
+		}
 		dir := filepath.Join(smithDir, "tools", name)
 		// Integrity: vendored source must match the pinned hash (catches a
 		// tampered/edited vendored tree vs the reviewed lockfile).
@@ -539,6 +640,14 @@ func cmdInstall(p config.Paths, args []string) error {
 		}
 		if err := materializeTool(p, name, t, binDir, absBinEarly); err != nil {
 			return err
+		}
+	}
+	// External (mise) tools are pinned in mise.toml; fetch them via mise.
+	if miseTools {
+		mi := exec.Command("mise", "install")
+		mi.Stdout, mi.Stderr = os.Stderr, os.Stderr
+		if err := mi.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "[smith] note: `mise install` failed; run it in this dir")
 		}
 	}
 	if err := ensureActivation(".", absBinEarly); err != nil {

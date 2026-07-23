@@ -126,6 +126,23 @@ See the cli-creator skill for the agent-friendly CLI contract.
 For every runtime the PR diff is reviewable source, portable across
 teammates' platforms; build/warm happens locally at install.
 
+## Third-party CLIs (via mise)
+
+To standardize an existing third-party CLI — not a smith tool — across a project:
+
+```sh
+smith use --mise ubi:DataDog/pup     # also node@20, go:github.com/x/y, aqua:owner/repo
+```
+
+This pins the tool + version in the project's committed `mise.toml` and records
+it in `.smith/tools.yaml` (`smith list` shows it as `external (mise)`); the
+review surface is the `mise.toml` diff. There is **no source review** — you trust
+the upstream CLI and mise's fetch, exactly as with mise directly. smith adds a
+per-project reviewable pin, a unified `smith list`, and the org allowlist (which
+still applies). Teammates run `smith install` (which runs `mise install`) to get
+it. There's no self-test and no SKILL export — it's an external binary, clearly
+distinct from a source-reviewed smith tool.
+
 ## Sandbox host requirements
 
 Tools self-test/run sandboxed, so a functional sandbox is required: macOS

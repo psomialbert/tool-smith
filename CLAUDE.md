@@ -47,6 +47,10 @@ sync silently. **Before committing, verify each still matches actual behavior:**
   hash), map it in `manifestPerms`, surface it in `capabilitySummary`, and
   document it (SECURITY.md, README, cli-creator). Perms must stay enforced at
   the self-test, not just declared.
+- **Touch per-tool loops** (install/verify/list/doctor) → external tools
+  (`ProjTool.isMise()`, adopted via `smith use --mise`) have no vendored source,
+  sha, `.smith/bin` entry, or SKILL. Any loop that hashes/materializes/verifies
+  a vendored tool must skip `isMise()` entries (they're fetched via `mise`).
 - **Add a health check** → add it to the `doctorChecks()` registry in
   `cmd/smith/doctor.go` as a diagnose/apply pair. Reuse the shared halves
   (`activationState`, `gitignoreMissing`, `materializeTool`, `diagnoseV1Home`,

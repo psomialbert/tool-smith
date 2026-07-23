@@ -37,6 +37,11 @@ func cmdVerify(p config.Paths, args []string) error {
 	names := sortedToolNames(lock)
 	for _, name := range names {
 		t := lock.Tools[name]
+		if t.isMise() {
+			// External tool: no vendored source to hash — pinned in mise.toml.
+			results = append(results, result{name, "external", "external (mise) — not vendored"})
+			continue
+		}
 		dir := filepath.Join(smithDir, "tools", name)
 		if _, err := os.Stat(dir); err != nil {
 			results = append(results, result{name, "missing", "no vendored source at " + dir})
@@ -73,9 +78,12 @@ func cmdVerify(p config.Paths, args []string) error {
 		return nil
 	}
 	for _, r := range results {
-		if r.Status == "ok" {
+		switch r.Status {
+		case "ok":
 			fmt.Printf("  ✓ %s\n", r.Tool)
-		} else {
+		case "external":
+			fmt.Printf("  • %s: %s\n", r.Tool, r.Detail)
+		default:
 			fmt.Printf("  ✗ %s: %s\n", r.Tool, r.Detail)
 		}
 	}
