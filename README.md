@@ -132,8 +132,20 @@ Tools self-test/run sandboxed, so a functional sandbox is required: macOS
 Seatbelt (`sandbox-exec`, built in) or Linux bubblewrap (`bwrap`) with
 **unprivileged user + network namespaces enabled**. smith fails closed
 otherwise — e.g. GitHub Actions' Ubuntu runners forbid the netns setup
-`--unshare-net` needs, so sandboxed runs can't happen there. Per-tool
-`sandbox: {network: true}` in a manifest grants egress to that tool.
+`--unshare-net` needs, so sandboxed runs can't happen there.
+
+A tool declares any extra capabilities it needs in its manifest:
+
+```yaml
+sandbox:
+  network: true                 # allow network egress
+  write: ["~/.cache/mytool"]    # extra writable paths beyond CWD+TMP
+```
+
+These are **surfaced** when you adopt (`⚠ requests capabilities: …`) so a
+reviewer sees them, and **enforced** during the self-test — the tool gets
+exactly what it declared, nothing more. Request the minimum; a broad grant is a
+review flag.
 
 ## Layout
 

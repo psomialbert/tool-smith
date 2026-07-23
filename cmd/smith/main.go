@@ -644,7 +644,7 @@ func healStaleActivation(lines []string, newLine string) ([]string, bool) {
 // runSelfTest executes <dir>/selftest.sh <entry> sandboxed, from a scratch
 // workdir, with a strict (no-network) profile and sanitized env. Unreviewed
 // code stays contained while it's being adopted.
-func runSelfTest(p config.Paths, dir, entry string) error {
+func runSelfTest(p config.Paths, dir, entry string, perms sandbox.Perms) error {
 	st := filepath.Join(dir, "selftest.sh")
 	if _, err := os.Stat(st); err != nil {
 		return fmt.Errorf("selftest.sh missing: a tool without a self-test cannot be adopted")
@@ -654,7 +654,7 @@ func runSelfTest(p config.Paths, dir, entry string) error {
 		return err
 	}
 	defer os.RemoveAll(work)
-	argv, err := sandbox.Command(p.SandboxProfiles, work, sandbox.Perms{}, []string{"/bin/bash", st, entry})
+	argv, err := sandbox.Command(p.SandboxProfiles, work, perms, []string{"/bin/bash", st, entry})
 	if err != nil {
 		return err
 	}

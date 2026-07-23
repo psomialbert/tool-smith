@@ -35,6 +35,11 @@ agent into adopting or running something it shouldn't.
   (tokens, cloud creds, and session identifiers are stripped, since an env var
   copied to a file is an exfiltration channel). smith **fails closed** — if no
   functional sandbox is available, it refuses rather than run unsandboxed.
+- **Declared capabilities.** A tool may request grants in its manifest
+  (`sandbox: {network: true, write: [...]}`). smith **surfaces** them at
+  adoption ("⚠ requests capabilities: network egress; write: …") so a reviewer
+  sees them, and **enforces** them at the self-test — the tool gets exactly what
+  it declared and nothing more; everything else stays denied.
 - **Integrity / reproducibility.** Each vendored bundle is content-hashed and
   pinned. `smith install` and `smith verify --frozen` re-hash and refuse on
   mismatch (go.sum-style), so a tampered vendored tree is caught, and a teammate
@@ -55,8 +60,9 @@ Be explicit — the gate is only as strong as these hold:
   PATH, smith does **not** sandbox it at runtime — it runs as any program you
   installed would. The sandbox contains *adopt-time* self-tests, not
   post-adoption execution. The protection is the *review*, not runtime
-  confinement. (Declared-capability review + enforcement is being added; runtime
-  sandboxing of adopted tools is a longer-term item.)
+  confinement. (Declared capabilities are surfaced at adoption and enforced
+  during the self-test; runtime sandboxing of *adopted* tools is a longer-term
+  item.)
 - **The review must actually happen.** If a reviewer merges an adoption PR
   without reading the vendored diff, the gate provides no protection. smith makes
   the diff small and reviewable; it cannot force scrutiny.

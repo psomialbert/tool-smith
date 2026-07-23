@@ -46,11 +46,14 @@ type Manifest struct {
 	Sandbox     *SandboxSpec `yaml:"sandbox,omitempty"` // per-tool grants beyond the strict default
 }
 
-// SandboxSpec is the tool's requested sandbox relaxations. Absent = the
-// strict default (no network, writes confined to CWD+TMP). Any grant here is
-// surfaced at adoption review — a tool asking for network is a flag to scrutinize.
+// SandboxSpec is the tool's requested sandbox relaxations (its declared
+// capabilities). Absent = the strict default (no network, writes confined to
+// CWD+TMP). Every grant here is surfaced at adoption and enforced during the
+// sandboxed self-test — a tool asking for network or extra write paths is a
+// flag to scrutinize in review.
 type SandboxSpec struct {
-	Network bool `yaml:"network,omitempty"`
+	Network bool     `yaml:"network,omitempty"` // allow network egress
+	Write   []string `yaml:"write,omitempty"`   // extra writable paths beyond CWD+TMP (a leading ~ expands to $HOME)
 }
 
 func render(tpl string, m Manifest) (string, error) {

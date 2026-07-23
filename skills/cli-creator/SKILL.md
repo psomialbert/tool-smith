@@ -107,6 +107,22 @@ smith works. Keep the tool skill to: sharpened trigger (frontmatter
 - It executes inside the sandbox: no network, writes only to a scratch CWD and
   TMP. Design the tool (and its tests) accordingly.
 
+## Declaring capabilities
+
+The self-test runs in a strict sandbox: no network, writes only to a scratch
+CWD+TMP. If your tool genuinely needs more *during its self-test*, declare the
+minimum in the manifest:
+
+```yaml
+sandbox:
+  network: true                 # only if the tool must reach the network
+  write: ["~/.cache/<name>"]    # extra writable paths beyond CWD+TMP
+```
+
+smith surfaces these at adoption (`⚠ requests capabilities: …`) and enforces
+exactly them — nothing else. A grant is a review flag, so request the least you
+need, and prefer designs that need none (read stdin, write stdout/CWD).
+
 ## Runtimes & dependencies
 
 - `bash`, `python` (stdlib-only) — the entrypoint IS the source, run directly.
