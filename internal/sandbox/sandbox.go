@@ -271,31 +271,41 @@ func Command(profilesDir, workDir string, perms Perms, argv []string, roPaths ..
 				return nil, err
 			}
 		}
-		out := []string{
-			"bwrap",
-			"--ro-bind", "/", "/",
-			"--dev", "/dev",
-			"--tmpfs", "/tmp",
-			"--dir", linuxScratchHome,
-			"--bind", cwd, cwd,
-			"--die-with-parent",
-		}
-		// Re-bind read-only paths AFTER the tmpfs so a clone under /tmp stays
-		// readable (the tmpfs would otherwise mask it).
-		for _, ro := range roPaths {
-			if ro == "" {
-				continue
-			}
-			out = append(out, "--ro-bind", ro, ro)
-		}
-		for _, w := range perms.sortedWritePaths() {
-			out = append(out, "--bind", w, w) // rw bind for a granted write path
-		}
-		if !perms.Network {
-			out = append(out, "--unshare-net")
-		}
-		return append(out, argv...), nil
+		return linuxBwrapArgv(cwd, perms, roPaths, argv), nil
 	default:
 		return nil, fmt.Errorf("no sandbox mechanism for %s; refusing to run tool unsandboxed", runtime.GOOS)
 	}
+}
+
+// linuxBwrapArgv builds the bubblewrap argv for a sandboxed run. Extracted as a
+// pure function so the mount-precedence invariant (a read-only path nested in a
+// broader write grant must stay read-only) is testable on any OS.
+func linuxBwrapArgv(cwd string, perms Perms, roPaths []string, argv []string) []string {
+	out := []string{
+		"bwrap",
+		"--ro-bind", "/", "/",
+		"--dev", "/dev",
+		"--tmpfs", "/tmp",
+		"--dir", linuxScratchHome,
+		"--bind", cwd, cwd,
+		"--die-with-parent",
+	}
+	// Read-write grants first, then re-bind read-only paths LAST. bwrap is
+	// last-mount-wins, so a read-only path nested inside a broader write grant
+	// (the clone dir under a /tmp grant) stays read-only — matching the macOS
+	// profile's deny-last precedence. The read-only re-bind also sits after the
+	// tmpfs so a clone under /tmp isn't masked (the tmpfs would hide it).
+	for _, w := range perms.sortedWritePaths() {
+		out = append(out, "--bind", w, w) // rw bind for a granted write path
+	}
+	for _, ro := range roPaths {
+		if ro == "" {
+			continue
+		}
+		out = append(out, "--ro-bind", ro, ro)
+	}
+	if !perms.Network {
+		out = append(out, "--unshare-net")
+	}
+	return append(out, argv...)
 }
