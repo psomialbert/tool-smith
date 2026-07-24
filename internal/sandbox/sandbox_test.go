@@ -37,6 +37,55 @@ func TestSeatbeltProfileReadOnlyDenyOrder(t *testing.T) {
 	}
 }
 
+// TestCloneStaysReadOnlyUnderWriteGrant is the cross-platform parity invariant
+// behind the adopt-time tamper defense: even when the manifest grants write to
+// a parent directory (e.g. /tmp) that contains the clone, the clone itself must
+// stay read-only during the self-test, so the bytes that get vendored+pinned
+// match the bytes that were tested. Both backends must enforce it, and the
+// macOS test alone (TestSeatbeltProfileReadOnlyDenyOrder) missed that the Linux
+// bwrap ordering had the opposite (broken) precedence.
+func TestCloneStaysReadOnlyUnderWriteGrant(t *testing.T) {
+	clone := "/tmp/smith-adopt-abc/repo"
+	perms := Perms{WritePaths: []string{"/tmp"}} // a grant covering the clone's parent
+	roPaths := []string{clone}
+
+	// Linux/bwrap is last-mount-wins: the read-only re-bind of the clone must
+	// come AFTER the read-write bind of the parent grant.
+	argv := linuxBwrapArgv("/work", perms, roPaths, []string{"/bin/bash"})
+	rwParent := lastMountIndex(argv, "--bind", "/tmp")
+	roClone := lastMountIndex(argv, "--ro-bind", clone)
+	if roClone < 0 {
+		t.Fatalf("bwrap never re-bound the clone read-only: %v", argv)
+	}
+	if roClone < rwParent {
+		t.Fatalf("bwrap: ro-bind of clone (idx %d) precedes rw --bind of /tmp (idx %d) — rw wins, clone is writable during self-test", roClone, rwParent)
+	}
+
+	// macOS/Seatbelt is last-match-wins: the write-DENY of the clone must come
+	// AFTER the write-ALLOW of the parent grant.
+	prof := seatbeltProfile(perms, roPaths)
+	allowParent := strings.Index(prof, `(allow file-write* (subpath "/tmp"))`)
+	denyClone := strings.Index(prof, `(deny file-write* (subpath "`+clone+`"))`)
+	if denyClone < 0 {
+		t.Fatalf("seatbelt never denied the clone:\n%s", prof)
+	}
+	if denyClone < allowParent {
+		t.Fatalf("seatbelt: deny of clone (idx %d) precedes allow of /tmp (idx %d)", denyClone, allowParent)
+	}
+}
+
+// lastMountIndex returns the index of the last "flag path ..." mount in argv, or
+// -1. bwrap applies mounts left-to-right, so a larger index wins.
+func lastMountIndex(argv []string, flag, path string) int {
+	idx := -1
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == flag && argv[i+1] == path {
+			idx = i
+		}
+	}
+	return idx
+}
+
 func TestProfileNameDistinctPerPerms(t *testing.T) {
 	if profileName(Perms{}, nil) != "default.sb" {
 		t.Fatal("strict → default.sb")

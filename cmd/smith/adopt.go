@@ -582,15 +582,25 @@ func manifestPerms(m scaffold.Manifest) (sandbox.Perms, error) {
 	return perms, nil
 }
 
+// benignHomeWriteRoots are the ONLY top-level dirs under $HOME an unreviewed
+// self-test may be granted write access to: regenerable caches with no
+// auto-load/auto-exec semantics. Grants under $HOME are allowlist-only (see
+// forbiddenWriteGrant) — everything not named here is refused, so a new
+// persistence surface is denied by default instead of needing to be enumerated.
+// Adding an entry widens the trust gate — do it only for a dir that cannot cause
+// code to run later.
+var benignHomeWriteRoots = map[string]bool{".cache": true}
+
 // forbiddenWriteGrant reports why abs is too dangerous to grant an unreviewed
 // self-test write access to (empty string = allowed). It blocks the filesystem
-// root, system directories, the home directory (and any parent of it),
-// credential/secret stores, the project working tree, hidden dotfiles/dotdirs
-// directly under $HOME (shell rc files, ~/.config, ~/.claude, ~/.gitconfig — the
-// persistence surface), and the macOS launch-agent dirs — the paths a hostile
-// manifest would name to persist or exfiltrate. A tool's own scratch needs are
-// already covered by the always-granted CWD + TMP; a grant beyond those to these
-// locations has no legitimate self-test use. abs is assumed absolute + cleaned.
+// root, system directories, and the project working tree; within $HOME it is
+// allowlist-only (only benignHomeWriteRoots is grantable, so ~/.claude/skills,
+// ~/Library, ~/bin, ~/.config, shell rc files, etc. are all refused without
+// enumerating each); and it refuses any user home tree (/home/*, /Users/*,
+// /root) unconditionally, which also fails closed when $HOME is unset. A tool's
+// own scratch needs are covered by the always-granted CWD + TMP, so a grant
+// beyond those into these locations has no legitimate self-test use. abs is
+// assumed absolute + cleaned.
 func forbiddenWriteGrant(abs, home string) string {
 	if abs == "/" {
 		return "the filesystem root"
@@ -608,32 +618,35 @@ func forbiddenWriteGrant(abs, home string) string {
 			return "the project working tree"
 		}
 	}
+	sep := string(filepath.Separator)
+	// Inside $HOME: allowlist-only. Denylisting individual persistence subtrees
+	// kept leaving siblings (a parent dir like ~/Library, a non-hidden PATH dir
+	// like ~/bin, a case-folded name, deeper nesting), so instead permit only a
+	// blessed scratch root and refuse everything else under home.
 	if home != "" {
 		if abs == home {
 			return "the home directory"
 		}
-		if strings.HasPrefix(home, abs+string(filepath.Separator)) {
+		if strings.HasPrefix(home, abs+sep) {
 			return "a parent of the home directory"
 		}
-		for _, sub := range []string{".ssh", ".aws", ".gnupg", ".kube", ".docker"} {
-			p := filepath.Join(home, sub)
-			if abs == p || strings.HasPrefix(abs, p+string(filepath.Separator)) {
-				return "a credential store (~/" + sub + ")"
+		if rel, err := filepath.Rel(home, abs); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+sep) {
+			first := rel
+			if i := strings.IndexByte(rel, filepath.Separator); i >= 0 {
+				first = rel[:i]
 			}
-		}
-		// A hidden entry directly under $HOME — shell rc files (~/.zshrc,
-		// ~/.bashrc, ~/.profile), ~/.config, ~/.claude, ~/.gitconfig — is a
-		// persistence/skill-injection surface. Require a named subpath instead
-		// (e.g. ~/.cache/mytool), which has a non-hidden ancestor under home.
-		if filepath.Dir(abs) == home && strings.HasPrefix(filepath.Base(abs), ".") {
-			return "a hidden file/dir directly under $HOME (persistence surface)"
-		}
-		// macOS launch agents/daemons: dropping a plist here persists code.
-		for _, sub := range []string{"Library/LaunchAgents", "Library/LaunchDaemons"} {
-			p := filepath.Join(home, sub)
-			if abs == p || strings.HasPrefix(abs, p+string(filepath.Separator)) {
-				return "a macOS launch-agent directory (~/" + sub + ")"
+			if benignHomeWriteRoots[first] {
+				return "" // blessed scratch root and its subtree: allowed
 			}
+			return "a path under $HOME (only a regenerable scratch root like ~/.cache may be granted)"
+		}
+	}
+	// Any user's home tree — including when $HOME is unset (CI/systemd/cron), so
+	// the checks above couldn't run, and including another account's home. A
+	// write grant here is never a legitimate self-test need.
+	for _, d := range []string{"/home", "/Users", "/root"} {
+		if abs == d || strings.HasPrefix(abs, d+sep) {
+			return "a user home directory tree"
 		}
 	}
 	return ""
