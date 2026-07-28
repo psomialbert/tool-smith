@@ -58,10 +58,21 @@ func allowlistKeygen(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(*out); err == nil {
-		return fmt.Errorf("%s already exists — refusing to overwrite a private key", *out)
+	// O_EXCL (no follow) so an existing file OR a pre-planted (possibly dangling)
+	// symlink at --out is refused, rather than stat-then-write racing or writing
+	// the private key through the link to an attacker-chosen target.
+	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("%s already exists — refusing to overwrite a private key", *out)
+		}
+		return err
 	}
-	if err := os.WriteFile(*out, []byte(base64.StdEncoding.EncodeToString(priv)+"\n"), 0o600); err != nil {
+	if _, err := f.WriteString(base64.StdEncoding.EncodeToString(priv) + "\n"); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	fmt.Printf("private key → %s  (keep it secret; do NOT commit it)\n", *out)

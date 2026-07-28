@@ -110,3 +110,28 @@ func TestUnsignedAllowlistStillWorksWithoutPublicKey(t *testing.T) {
 		t.Fatalf("unsigned allowlist without public_key must work: %v %v", pats, err)
 	}
 }
+
+// TestKeygenRefusesDanglingSymlink guards the stat-then-write TOCTOU: a dangling
+// symlink at --out passed the os.Stat existence check (stat follows the link and
+// errors "not found"), then os.WriteFile followed it and dropped the private key
+// at the link target. O_EXCL must refuse instead.
+func TestKeygenRefusesDanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "out.key")
+	target := filepath.Join(dir, "evil-target")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := allowlistKeygen([]string{"--out", link}); err == nil {
+		t.Fatal("keygen must refuse to write a private key through a dangling symlink")
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Fatal("keygen followed the symlink and wrote the key at the target")
+	}
+	// A plain existing file is still refused.
+	plain := filepath.Join(dir, "exists.key")
+	os.WriteFile(plain, []byte("x"), 0o600)
+	if err := allowlistKeygen([]string{"--out", plain}); err == nil {
+		t.Fatal("keygen must refuse to overwrite an existing file")
+	}
+}

@@ -83,26 +83,31 @@ func saveProjLock(l ProjLock) error {
 	if err != nil {
 		return err
 	}
-	// Write to a temp file in the same dir, then rename over the target: a
-	// crash or a concurrent writer can't leave a half-written (torn) tools.yaml,
-	// and the rename is atomic within the directory.
-	tmp, err := os.CreateTemp(smithDir, ".tools.yaml.*")
+	return writeFileAtomic(lockPath(), raw, 0o644)
+}
+
+// writeFileAtomic writes data to path via a temp file in the same directory
+// followed by an atomic rename, so a crash or a concurrent writer can never
+// leave a half-written (torn) file — a plain os.WriteFile can. The parent
+// directory must already exist.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op after a successful rename
-	if _, err := tmp.Write(raw); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
+	if err := os.Chmod(tmpName, mode); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, lockPath())
+	return os.Rename(tmpName, path)
 }
 
 // metaParts are the non-source bundle files every tool carries.
@@ -183,14 +188,21 @@ func uvLockScript(dir, scriptRel string) error {
 
 // warmUVCache populates cacheAbs by resolving+installing the script's locked
 // deps, in a NETWORK-allowed sandbox with a sanitized env and writes confined
-// to workdir — so dep download/build can't reach secrets. cacheAbs must sit
-// under workdir (the sandbox's writable CWD).
+// to workdir. cacheAbs must sit under workdir (the sandbox's writable CWD).
 //
 // It uses `uv sync --script` (resolve + install the script's locked
 // dependencies) rather than `uv run --script`: the network is granted here for
 // dep fetching, and `uv run` would EXECUTE the untrusted tool's code with that
 // network access before the self-test gate — an exfiltration channel at adopt
-// time. `uv sync` populates the same cache without running the script.
+// time. `uv sync` populates the same cache without running the SCRIPT.
+//
+// RESIDUAL RISK (not yet closed): `uv sync` still builds any source-distribution
+// dependency, which runs that dependency's build backend with the granted
+// network. The env is sanitized, but the sandbox binds "/" read-only, so a
+// hostile build backend can still READ on-disk secrets (~/.ssh, ~/.aws) and
+// exfiltrate them over the network. Write-confinement does not prevent this.
+// Closing it means restricting the read surface (or network) of the build step
+// and needs testing against real uv tools — tracked, not fixed here.
 func warmUVCache(p config.Paths, workdir, scriptAbs, cacheAbs string) error {
 	argv, err := sandbox.Command(p.SandboxProfiles, workdir, sandbox.Perms{Network: true},
 		[]string{"uv", "sync", "--script", scriptAbs})
@@ -427,7 +439,7 @@ func cmdUse(p config.Paths, args []string) error {
 			source, strings.Join(pats, ", "), filepath.Join(p.Home, "config.yaml"))
 	}
 
-	res, err := adoptAtVersion(p, clonedURL, source, version)
+	res, err := adoptAtVersion(p, clonedURL, source, version, "")
 	if err != nil {
 		return err
 	}
@@ -669,7 +681,7 @@ func capabilitySummary(perms sandbox.Perms) string {
 // the reviewable source into .smith/tools/<name>/, and updates+saves the pin.
 // It is cmdUse's core, shared with `smith upgrade`. displaySource is used only
 // in error messages; the caller is responsible for any allowlist check.
-func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (adoptResult, error) {
+func adoptAtVersion(p config.Paths, clonedURL, displaySource, version, expectName string) (adoptResult, error) {
 	tmp, err := os.MkdirTemp("", "smith-adopt-")
 	if err != nil {
 		return adoptResult{}, err
@@ -701,6 +713,13 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version string) (a
 	m, err := scaffold.LoadManifest(clone)
 	if err != nil {
 		return adoptResult{}, fmt.Errorf("%s is not a smith tool (no valid manifest.yaml): %w", displaySource, err)
+	}
+	// On upgrade the caller pins a specific lock key; if the new version's
+	// manifest renamed the tool, keying off the new name would vendor a second
+	// tool and orphan the old pin+dir while reporting a successful upgrade.
+	// Refuse and make the rename an explicit re-adoption instead.
+	if expectName != "" && m.Name != expectName {
+		return adoptResult{}, fmt.Errorf("refusing to upgrade %q: it renamed itself to %q at %s — adopt the new name explicitly (`smith use %s@%s`) and remove the old pin", expectName, m.Name, version, displaySource, version)
 	}
 	switch m.Runtime {
 	case "bash", "python", "go", "python-uv":
@@ -852,6 +871,13 @@ func materializeTool(p config.Paths, name string, t ProjTool, binDir, absBinDir 
 }
 
 func cmdInstall(p config.Paths, args []string) error {
+	// install takes no arguments: it materializes every pinned tool. Reject
+	// unknown args rather than silently ignoring them — `smith install --json`
+	// or `smith install greet` would otherwise run a full install and exit 0,
+	// leaving the user believing their flag/target took effect.
+	if len(args) > 0 {
+		return fmt.Errorf("unknown argument %q (usage: smith install); install materializes all pinned tools and takes no arguments", args[0])
+	}
 	lock, err := loadProjLock()
 	if err != nil {
 		return err

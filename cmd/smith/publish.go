@@ -61,6 +61,20 @@ func cmdPublish(p config.Paths, args []string) error {
 			return fmt.Errorf("gh repo create: %w", err)
 		}
 	} else {
+		// Existing origin: we don't create the repo, so the --public/--private
+		// flag can't be applied at creation. Verify it rather than silently
+		// ignore it — refuse to push if the repo's actual visibility disagrees.
+		if slug := originGitHubSlug(); slug != "" {
+			if _, err := exec.LookPath("gh"); err == nil {
+				actual := ghRepoVisibility(slug)
+				if msg := visibilityMismatch(*public, actual); msg != "" {
+					return fmt.Errorf("%s — change it in repo settings (or `gh repo edit %s --visibility %s`) before publishing", msg, slug, visKeyword(*public))
+				}
+				if actual == "" {
+					fmt.Fprintf(os.Stderr, "[smith] note: could not verify origin visibility; ensure %s is %s\n", slug, visKeyword(*public))
+				}
+			}
+		}
 		if err := runGit("git", "push", "-u", "origin", "HEAD"); err != nil {
 			return fmt.Errorf("git push: %w", err)
 		}
@@ -139,6 +153,16 @@ func ensureGitRepo(dir string, m scaffold.Manifest) error {
 	if err := runGit("git", "-C", dir, "add", "-A"); err != nil {
 		return err
 	}
+	// Refuse to commit anything that looks like a secret: `git add -A` would
+	// otherwise sweep a stray private key (e.g. the keygen default
+	// smith-allowlist.key) into a repo that may be pushed public.
+	staged, err := stagedFiles(dir)
+	if err != nil {
+		return err
+	}
+	if bad := sensitiveStagedPaths(staged); len(bad) > 0 {
+		return fmt.Errorf("refusing to publish: these staged files look like secrets: %s — remove them or add them to .gitignore before publishing", strings.Join(bad, ", "))
+	}
 	// Commit only if there's something staged (dirty tree or first commit).
 	if exec.Command("git", "-C", dir, "diff", "--cached", "--quiet").Run() != nil {
 		if err := runGit("git", "-C", dir, "commit", "-q", "-m", m.Name+" "+publishTag(m, "")); err != nil {
@@ -146,6 +170,75 @@ func ensureGitRepo(dir string, m scaffold.Manifest) error {
 		}
 	}
 	return nil
+}
+
+// sensitiveStagedPaths returns the staged paths whose basename looks like a
+// secret that must never be committed to a (possibly public) repo: the keygen
+// default private key, any private-key/cert file, dotenv files, and SSH keys.
+func sensitiveStagedPaths(staged []string) []string {
+	var bad []string
+	for _, p := range staged {
+		base := filepath.Base(p)
+		switch {
+		case strings.HasSuffix(base, ".key"), strings.HasSuffix(base, ".pem"),
+			strings.HasSuffix(base, ".p12"), strings.HasSuffix(base, ".pfx"),
+			base == ".env" || strings.HasPrefix(base, ".env."),
+			base == "id_rsa" || base == "id_dsa" || base == "id_ecdsa" || base == "id_ed25519":
+			bad = append(bad, p)
+		}
+	}
+	return bad
+}
+
+// stagedFiles lists paths staged for commit in dir (respects .gitignore, since
+// git add -A already ran).
+func stagedFiles(dir string) ([]string, error) {
+	out, err := exec.Command("git", "-C", dir, "diff", "--cached", "--name-only", "-z").Output()
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, f := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	return files, nil
+}
+
+// visibilityMismatch reports why an existing repo's visibility disagrees with
+// the requested --public/--private, or "" if it matches (or can't be
+// determined). actual is gh's visibility string (public/private/internal, any
+// case); internal counts as neither public nor private.
+func visibilityMismatch(wantPublic bool, actual string) string {
+	a := strings.ToLower(strings.TrimSpace(actual))
+	if a == "" {
+		return "" // unknown — caller warns rather than blocks
+	}
+	if wantPublic && a != "public" {
+		return "origin repo is " + a + " but --public was requested"
+	}
+	if !wantPublic && a != "private" {
+		return "origin repo is " + a + " but --private was requested"
+	}
+	return ""
+}
+
+// ghRepoVisibility returns the repo's visibility via gh, or "" if it can't be
+// determined (gh missing, not authenticated, repo not found).
+func ghRepoVisibility(slug string) string {
+	out, err := exec.Command("gh", "repo", "view", slug, "--json", "visibility", "--jq", ".visibility").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func visKeyword(public bool) string {
+	if public {
+		return "public"
+	}
+	return "private"
 }
 
 // runGit runs a command, streaming stderr, returning an error on non-zero exit.
@@ -195,9 +288,11 @@ func originGitHubSlug() string {
 }
 
 // gitHubSlugFromURL extracts owner/name from a github.com remote URL, or "".
-// "github.com" must appear as a host boundary — preceded by start/"@"/"/" and
-// followed by ":" or "/" — so a look-alike host like "mygithub.company.com"
-// (which merely contains the substring "github.com") isn't mistaken for it.
+// "github.com" must appear as the HOST — at the start, right after "@"
+// (scp form), or right after "//" (scheme separator) — and be followed by
+// ":" or "/". A single "/" before it is a path segment, so a non-github host
+// with "github.com" in its PATH (https://evil.com/github.com/acme/x) or a
+// look-alike host (mygithub.company.com) is not mistaken for github.com.
 func gitHubSlugFromURL(url string) string {
 	const host = "github.com"
 	for off := 0; ; {
@@ -206,7 +301,7 @@ func gitHubSlugFromURL(url string) string {
 			return ""
 		}
 		i := off + rel
-		before := i == 0 || url[i-1] == '@' || url[i-1] == '/'
+		before := i == 0 || url[i-1] == '@' || (i >= 2 && url[i-1] == '/' && url[i-2] == '/')
 		end := i + len(host)
 		after := end < len(url) && (url[end] == ':' || url[end] == '/')
 		if before && after {

@@ -383,6 +383,16 @@ func doctorChecks() []check {
 					dir := filepath.Join(dc.projectDir, smithDir, "tools", name)
 					f := finding{Check: "vendored-sha", Scope: scopeProject}
 					src := sourceFiles(t.Runtime, t.Entrypoint, name)
+					if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+						// bundleHash skips absent files, so a missing dir would
+						// hash as the empty set and read as "sha ≠ pin". Report
+						// the real problem instead.
+						f.Severity = sevERROR
+						f.Message = name + ": no vendored source at " + dir
+						f.FixHint = "smith use " + t.Source + "@" + t.Version + "  (re-vendor) or restore from git"
+						out = append(out, f)
+						continue
+					}
 					sum, err := bundleHash(dir, src)
 					extra, xerr := unexpectedFiles(dir, src)
 					switch {

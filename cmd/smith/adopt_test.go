@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"smith/internal/scaffold"
@@ -228,5 +229,45 @@ func TestUseInstallLocalRepo(t *testing.T) {
 		[]byte("#!/bin/bash\necho tampered\n"), 0o755)
 	if err := cmdInstall(p, nil); err == nil {
 		t.Fatal("install should refuse a vendored-source sha mismatch")
+	}
+}
+
+// TestInstallRejectsUnknownArgs guards against `smith install` silently ignoring
+// flags/arguments (e.g. `smith install --json` or `smith install greet`) and
+// running a full install anyway. Unknown args must be rejected before any work.
+func TestInstallRejectsUnknownArgs(t *testing.T) {
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	for _, a := range [][]string{{"--json"}, {"greet"}, {"--frozen"}} {
+		err := cmdInstall(p, a)
+		if err == nil || !strings.Contains(err.Error(), "unknown argument") {
+			t.Errorf("cmdInstall(%v) = %v; want an 'unknown argument' error", a, err)
+		}
+	}
+}
+
+// TestWriteFileAtomic guards the atomic-write helper used for config.yaml and
+// tools.yaml: it round-trips content, overwrites an existing file, applies the
+// mode, and leaves no partial/temp sibling behind (a crash between write and
+// rename can't yield a torn file).
+func TestWriteFileAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(path, []byte("new-content"), 0o600); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != "new-content" {
+		t.Fatalf("content = %q, want new-content", got)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, want 0600", fi.Mode().Perm())
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected only the target file, found stray temp files: %v", entries)
 	}
 }

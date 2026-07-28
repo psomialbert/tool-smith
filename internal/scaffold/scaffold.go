@@ -114,6 +114,9 @@ func Create(dir string, m Manifest) error {
 		"selftest.sh": {"selftest.sh", 0o755},
 		"SKILL.md":    {"SKILL.md", 0o644},
 		"README.md":   {"README.md", 0o644},
+		// Named "gitignore" in templates/ because go:embed * skips dotfiles;
+		// written out as .gitignore so a new tool keeps secrets out of git.
+		".gitignore": {"gitignore", 0o644},
 	}
 	if src := SourceFile(m); src != "" {
 		// Compiled/wrapped: source is separate; adoption (`smith use`) produces
