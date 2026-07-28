@@ -143,3 +143,19 @@ func TestCapabilitySummary(t *testing.T) {
 		t.Fatalf("summary should name network + write: %q", s)
 	}
 }
+
+func TestManifestPermsMapsBuild(t *testing.T) {
+	if !mustPerms(t, scaffold.Manifest{Sandbox: &scaffold.SandboxSpec{Build: true}}).Build {
+		t.Fatal("sandbox.build must map to perms.Build")
+	}
+	if mustPerms(t, scaffold.Manifest{Sandbox: &scaffold.SandboxSpec{}}).Build {
+		t.Fatal("build must default to false")
+	}
+}
+
+func TestCapabilitySummaryNamesBuild(t *testing.T) {
+	s := capabilitySummary(mustPerms(t, scaffold.Manifest{Sandbox: &scaffold.SandboxSpec{Build: true}}))
+	if !strings.Contains(s, "build") {
+		t.Fatalf("summary must surface the build opt-in, got %q", s)
+	}
+}

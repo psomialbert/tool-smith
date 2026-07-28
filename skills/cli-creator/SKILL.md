@@ -117,6 +117,12 @@ minimum in the manifest:
 sandbox:
   network: true                 # only if the tool must reach the network
   write: ["~/.cache/<name>"]    # extra writable paths beyond CWD+TMP
+  build: true                   # python-uv only, RARE: allow building a
+                                # dependency from source at adopt time. Off by
+                                # default (wheels only); opting in runs the
+                                # dependency's build code with network + local
+                                # file read, so reviewers scrutinize it. Prefer
+                                # deps that ship wheels.
 ```
 
 smith surfaces these at adoption (`⚠ requests capabilities: …`) and enforces

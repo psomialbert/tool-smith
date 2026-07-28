@@ -271,3 +271,20 @@ func TestWriteFileAtomic(t *testing.T) {
 		t.Fatalf("expected only the target file, found stray temp files: %v", entries)
 	}
 }
+
+// TestUVArgsForbidsBuildUnlessOptedIn: adopting a python-uv tool must not build
+// dependency source (which runs arbitrary build backends) unless the tool opted
+// in via sandbox.build.
+func TestUVArgsForbidsBuildUnlessOptedIn(t *testing.T) {
+	def := strings.Join(uvArgs("lock", "greet.py", false), " ")
+	if !strings.Contains(def, "--no-build") {
+		t.Fatalf("default (no opt-in) must pass --no-build, got %q", def)
+	}
+	if !strings.Contains(def, "lock") || !strings.Contains(def, "--script") || !strings.Contains(def, "greet.py") {
+		t.Fatalf("must run the subcommand over the script, got %q", def)
+	}
+	optedIn := strings.Join(uvArgs("sync", "greet.py", true), " ")
+	if strings.Contains(optedIn, "--no-build") {
+		t.Fatalf("build opt-in must NOT pass --no-build, got %q", optedIn)
+	}
+}

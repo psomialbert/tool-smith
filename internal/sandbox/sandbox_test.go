@@ -230,3 +230,15 @@ func TestEnvExplicitPassthrough(t *testing.T) {
 		t.Fatal("pass-env of unset var should error, not silently forward nothing")
 	}
 }
+
+// TestBuildFlagDoesNotAffectProfile: Perms.Build is a build-policy flag, not a
+// mount grant — it must not change the seatbelt profile or its cache name, or a
+// build-opted tool would collide with / evict a non-build profile.
+func TestBuildFlagDoesNotAffectProfile(t *testing.T) {
+	if seatbeltProfile(Perms{Build: true}, nil) != seatbeltProfile(Perms{}, nil) {
+		t.Fatal("Build must not alter the seatbelt profile")
+	}
+	if profileName(Perms{Build: true}, nil) != profileName(Perms{}, nil) {
+		t.Fatal("Build must not alter the profile cache name")
+	}
+}
