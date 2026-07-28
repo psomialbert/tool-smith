@@ -62,7 +62,13 @@ agent into adopting or running something it shouldn't.
   (`$SMITH_HOME/config.yaml`), provisioned outside any project so a project PR
   can't widen it. The allowlist file can be **ed25519-signed**: with a pinned
   `public_key`, smith verifies the signature on every adoption and fails closed
-  if the file was edited or the signature is missing/invalid.
+  if the file was edited or the signature is missing/invalid. A signature proves
+  authenticity but not freshness, so smith also blocks **rollback**: put a
+  `# smith-allowlist-version: N` line in the file and bump it on each change;
+  smith records the highest version it has accepted in `$SMITH_HOME`
+  (trust-on-first-use) and refuses a validly-signed but older (lower-version)
+  file — an attacker who can only rewrite the file location can't serve a stale,
+  wider allowlist.
 
 ### What smith does NOT defend against (assumptions & limits)
 

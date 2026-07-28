@@ -225,6 +225,15 @@ allowlist:
   public_key: <base64 ed25519 public key>
 ```
 
+To block **rollback** (an attacker serving an old, validly-signed, wider list),
+add a version line to the file and bump it whenever you change it — smith records
+the highest version it has accepted and refuses an older one:
+
+```
+# smith-allowlist-version: 3
+github.com/acme/*
+```
+
 When `public_key` is set, smith verifies `allow.txt.sig` on every adoption and
 **fails closed** (blocks all adoptions) if it's missing, invalid, or the file
 was edited. `smith allowlist verify` reports the status. Distribute the public

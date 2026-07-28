@@ -297,7 +297,7 @@ func cmdAllowlist(p config.Paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	pats, err := allowlistPatterns(fc)
+	pats, err := allowlistPatterns(fc, p.Home)
 	if err != nil {
 		// A signature failure blocks adoptions; surface it here too.
 		return err

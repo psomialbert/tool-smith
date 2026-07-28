@@ -122,7 +122,7 @@ func cmdUpgrade(p config.Paths, args []string) error {
 	if ferr != nil {
 		return fmt.Errorf("reading %s (fix or remove it): %w", filepath.Join(p.Home, "config.yaml"), ferr)
 	}
-	pats, perr := allowlistPatterns(fc)
+	pats, perr := allowlistPatterns(fc, p.Home)
 	if perr != nil {
 		return perr
 	}
