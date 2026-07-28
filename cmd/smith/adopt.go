@@ -176,12 +176,49 @@ func buildGoTool(dir, outAbs string) error {
 
 // uvLockScript runs `uv lock --script` if the lockfile is absent, so the
 // vendored source carries a hash-locked dependency tree.
-func uvLockScript(dir, scriptRel string) error {
+// noBuildHint appends adoption guidance when a uv step failed and source builds
+// were forbidden — the likely cause is a dependency with no wheel. Empty when
+// the tool already opted into builds (then the failure is something else).
+func noBuildHint(allowBuild bool) string {
+	if allowBuild {
+		return ""
+	}
+	return "\n  (dependency source builds are disabled by default — the tool must ship wheels, or declare `sandbox: { build: true }` in its manifest, which lets its dependencies' build code run with network + local-file read at adopt time; review it before adopting)"
+}
+
+// uvArgs builds the argv for a uv subcommand ("lock"/"sync") over a PEP-723
+// script. Unless the tool opted into source builds (sandbox.build), it passes
+// --no-build so uv resolves/installs from wheels + PEP-658 metadata only and
+// never runs a dependency's build backend (arbitrary code) at adopt time.
+func uvArgs(subcmd, scriptRel string, allowBuild bool) []string {
+	args := []string{subcmd, "--script", scriptRel}
+	if !allowBuild {
+		args = append(args, "--no-build")
+	}
+	return args
+}
+
+// uvLockScript resolves the script's dependencies into <script>.lock. It runs
+// SANDBOXED (network for the resolve, sanitized env, writes confined to the
+// clone) — previously it ran unsandboxed with the real environment — and
+// forbids source builds unless allowBuild.
+func uvLockScript(p config.Paths, dir, scriptRel string, allowBuild bool) error {
 	if _, err := os.Stat(filepath.Join(dir, scriptRel+".lock")); err == nil {
 		return nil
 	}
-	cmd := exec.Command("uv", "lock", "--script", scriptRel)
+	argv, err := sandbox.Command(p.SandboxProfiles, dir, sandbox.Perms{Network: true},
+		append([]string{"uv"}, uvArgs("lock", scriptRel, allowBuild)...))
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = dir
+	env, cleanup, err := sandbox.Env(nil)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	cmd.Env = env
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	return cmd.Run()
 }
@@ -196,16 +233,15 @@ func uvLockScript(dir, scriptRel string) error {
 // network access before the self-test gate — an exfiltration channel at adopt
 // time. `uv sync` populates the same cache without running the SCRIPT.
 //
-// RESIDUAL RISK (not yet closed): `uv sync` still builds any source-distribution
-// dependency, which runs that dependency's build backend with the granted
-// network. The env is sanitized, but the sandbox binds "/" read-only, so a
-// hostile build backend can still READ on-disk secrets (~/.ssh, ~/.aws) and
-// exfiltrate them over the network. Write-confinement does not prevent this.
-// Closing it means restricting the read surface (or network) of the build step
-// and needs testing against real uv tools — tracked, not fixed here.
-func warmUVCache(p config.Paths, workdir, scriptAbs, cacheAbs string) error {
+// Building a source-distribution dependency would run that dependency's build
+// backend (arbitrary code) with the granted network — and since the sandbox
+// binds "/" read-only, it could read on-disk secrets (~/.ssh, ~/.aws) and
+// exfiltrate them at adopt time. uvArgs passes --no-build to forbid that unless
+// the tool opted in via sandbox.build (allowBuild), in which case the exposure
+// is explicit and surfaced to the reviewer by capabilitySummary.
+func warmUVCache(p config.Paths, workdir, scriptAbs, cacheAbs string, allowBuild bool) error {
 	argv, err := sandbox.Command(p.SandboxProfiles, workdir, sandbox.Perms{Network: true},
-		[]string{"uv", "sync", "--script", scriptAbs})
+		append([]string{"uv"}, uvArgs("sync", scriptAbs, allowBuild)...))
 	if err != nil {
 		return err
 	}
@@ -564,6 +600,7 @@ func manifestPerms(m scaffold.Manifest) (sandbox.Perms, error) {
 		return perms, nil
 	}
 	perms.Network = m.Sandbox.Network
+	perms.Build = m.Sandbox.Build
 	home, _ := os.UserHomeDir()
 	for _, w := range m.Sandbox.Write {
 		w = strings.TrimSpace(w)
@@ -673,6 +710,9 @@ func capabilitySummary(perms sandbox.Perms) string {
 	if len(perms.WritePaths) > 0 {
 		parts = append(parts, "write: "+strings.Join(perms.WritePaths, ", "))
 	}
+	if perms.Build {
+		parts = append(parts, "builds dependency source at adopt time (runs dependency build code with network + local-file read — review it)")
+	}
 	return strings.Join(parts, "; ")
 }
 
@@ -727,6 +767,14 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version, expectNam
 		return adoptResult{}, fmt.Errorf("runtime %q not yet supported (bash/python/go/python-uv)", m.Runtime)
 	}
 
+	// Resolve declared capabilities up front: the python-uv build steps below
+	// (which run before the self-test) need perms.Build to decide whether to
+	// forbid dependency source builds, and runSelfTest uses the same perms.
+	perms, err := manifestPerms(m)
+	if err != nil {
+		return adoptResult{}, fmt.Errorf("%s@%s — not adopted: %w", m.Name, version, err)
+	}
+
 	// Compiled/wrapped runtimes materialize a runnable before the self-test.
 	entry := filepath.Join(clone, m.Entrypoint)
 	switch m.Runtime {
@@ -739,13 +787,13 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version, expectNam
 			return adoptResult{}, fmt.Errorf("uv not found on PATH (required for python-uv tools)")
 		}
 		script := m.Name + ".py"
-		if err := uvLockScript(clone, script); err != nil {
-			return adoptResult{}, fmt.Errorf("uv lock failed — not adopted: %w", err)
+		if err := uvLockScript(p, clone, script, perms.Build); err != nil {
+			return adoptResult{}, fmt.Errorf("uv lock failed — not adopted: %w%s", err, noBuildHint(perms.Build))
 		}
 		cacheAbs, _ := filepath.Abs(filepath.Join(clone, "uv-cache"))
 		scriptAbs, _ := filepath.Abs(filepath.Join(clone, script))
-		if err := warmUVCache(p, clone, scriptAbs, cacheAbs); err != nil {
-			return adoptResult{}, fmt.Errorf("warming uv cache failed — not adopted: %w", err)
+		if err := warmUVCache(p, clone, scriptAbs, cacheAbs, perms.Build); err != nil {
+			return adoptResult{}, fmt.Errorf("warming uv cache failed — not adopted: %w%s", err, noBuildHint(perms.Build))
 		}
 		// Self-test runs the offline launcher (mirrors cache, no network).
 		entry = filepath.Join(clone, ".smith-launch")
@@ -759,12 +807,9 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version, expectNam
 
 	// Sandboxed self-test before vendoring: unreviewed code stays contained
 	// at adopt time; a failing self-test blocks adoption. The tool's declared
-	// capabilities (manifest `sandbox:`) are surfaced for the reviewer and are
-	// the grants the self-test runs with — everything else stays denied.
-	perms, err := manifestPerms(m)
-	if err != nil {
-		return adoptResult{}, fmt.Errorf("%s@%s — not adopted: %w", m.Name, version, err)
-	}
+	// capabilities (manifest `sandbox:`, resolved above) are surfaced for the
+	// reviewer and are the grants the self-test runs with — everything else
+	// stays denied.
 	if summary := capabilitySummary(perms); summary != "" {
 		fmt.Fprintf(os.Stderr, "[smith] ⚠ %s@%s requests capabilities: %s\n", m.Name, version, summary)
 		fmt.Fprintln(os.Stderr, "[smith]   these are granted during the self-test — scrutinize them when you review the adoption")
@@ -853,8 +898,14 @@ func materializeTool(p config.Paths, name string, t ProjTool, binDir, absBinDir 
 			return err
 		}
 		cwd, _ := os.Getwd()
-		if err := warmUVCache(p, cwd, scriptAbs, cacheAbs); err != nil {
-			return fmt.Errorf("%s: warming uv cache failed: %w", name, err)
+		// Match the adopt-time build policy: source builds only if the tool
+		// opted in (sandbox.build in its vendored, hash-verified manifest).
+		allowBuild := false
+		if vm, verr := scaffold.LoadManifest(dir); verr == nil && vm.Sandbox != nil {
+			allowBuild = vm.Sandbox.Build
+		}
+		if err := warmUVCache(p, cwd, scriptAbs, cacheAbs, allowBuild); err != nil {
+			return fmt.Errorf("%s: warming uv cache failed: %w%s", name, err, noBuildHint(allowBuild))
 		}
 		if err := os.WriteFile(link, []byte(pythonUVLauncher(scriptAbs, cacheAbs)), 0o755); err != nil {
 			return err

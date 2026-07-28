@@ -163,6 +163,8 @@ A tool declares any extra capabilities it needs in its manifest:
 sandbox:
   network: true                 # allow network egress
   write: ["~/.cache/mytool"]    # extra writable paths beyond CWD+TMP
+  build: true                   # python-uv only: allow dependency source builds
+                                # at adopt time (off by default — wheels only)
 ```
 
 These are **surfaced** when you adopt (`⚠ requests capabilities: …`) so a

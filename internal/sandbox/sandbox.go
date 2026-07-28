@@ -22,6 +22,12 @@ import (
 type Perms struct {
 	Network    bool     // allow network egress (default: denied)
 	WritePaths []string // absolute paths granted write access beyond CWD+TMP
+	// Build allows building dependency source at adopt time (python-uv). It is a
+	// build-policy flag, not a mount grant: it is surfaced to the reviewer and
+	// gates the uv --no-build flag, but it never affects the sandbox profile —
+	// seatbeltProfile and linuxBwrapArgv must ignore it (so it can't change the
+	// profile cache hash).
+	Build bool
 }
 
 // sortedWritePaths returns WritePaths sorted, for a deterministic profile.

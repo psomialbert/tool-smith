@@ -47,6 +47,12 @@ sync silently. **Before committing, verify each still matches actual behavior:**
   hash), map it in `manifestPerms`, surface it in `capabilitySummary`, and
   document it (SECURITY.md, README, cli-creator). Perms must stay enforced at
   the self-test, not just declared.
+  - **Build-policy flags are different from mount grants.** `sandbox: { build }`
+    (python-uv source builds) rides on `SandboxSpec`/`Perms` and is surfaced in
+    `capabilitySummary`, but it gates the uv `--no-build` arg (`uvArgs`), NOT the
+    sandbox profile — so it must be IGNORED by `seatbeltProfile`/`linuxBwrapArgv`
+    and stay OUT of `profileName`'s hash (else build-opted tools evict/collide on
+    the profile cache). Guarded by `TestBuildFlagDoesNotAffectProfile`.
 - **Touch per-tool loops** (install/verify/list/doctor) → external tools
   (`ProjTool.isMise()`, adopted via `smith use --mise`) have no vendored source,
   sha, `.smith/bin` entry, or SKILL. Any loop that hashes/materializes/verifies

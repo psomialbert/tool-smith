@@ -67,6 +67,7 @@ type Manifest struct {
 type SandboxSpec struct {
 	Network bool     `yaml:"network,omitempty"` // allow network egress
 	Write   []string `yaml:"write,omitempty"`   // extra writable paths beyond CWD+TMP (a leading ~ expands to $HOME)
+	Build   bool     `yaml:"build,omitempty"`   // allow building dependency source at adopt time (runs dep build backends; off by default)
 }
 
 func render(tpl string, m Manifest) (string, error) {

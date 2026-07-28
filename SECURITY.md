@@ -84,10 +84,17 @@ Be explicit — the gate is only as strong as these hold:
   guarantees the source you reviewed is what you run; it does not police what the
   upstream repo does after you adopt (that surfaces as a diff on the next
   `smith upgrade`).
-- **Build/warm steps run unsandboxed.** `go build` and `uv lock` run on the host
-  during adoption; a malicious `//go:embed`, cgo, or build script executes then.
-  Reviewers should scrutinize build-time constructs (called out in the Go
-  template).
+- **`go build` runs unsandboxed.** It runs on the host during adoption; a
+  malicious `//go:embed`, cgo, or build script executes then. Reviewers should
+  scrutinize build-time constructs (called out in the Go template).
+- **python-uv dependency builds are off by default.** `uv lock` and `uv sync`
+  run sandboxed (network for the resolve, sanitized env, writes confined) and
+  pass `--no-build`, so a dependency's build backend (arbitrary `setup.py` /
+  PEP-517 code) never runs at adopt time — resolution uses wheels + PEP-658
+  metadata only. A tool that genuinely needs a source build must declare
+  `sandbox: { build: true }`, which is surfaced to the reviewer
+  ("builds dependency source at adopt time…"); when opted in, the build backend
+  runs with network and can read local files, so review it before adopting.
 
 ## Scope for reports
 
