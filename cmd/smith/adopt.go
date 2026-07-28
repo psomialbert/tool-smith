@@ -188,14 +188,21 @@ func uvLockScript(dir, scriptRel string) error {
 
 // warmUVCache populates cacheAbs by resolving+installing the script's locked
 // deps, in a NETWORK-allowed sandbox with a sanitized env and writes confined
-// to workdir — so dep download/build can't reach secrets. cacheAbs must sit
-// under workdir (the sandbox's writable CWD).
+// to workdir. cacheAbs must sit under workdir (the sandbox's writable CWD).
 //
 // It uses `uv sync --script` (resolve + install the script's locked
 // dependencies) rather than `uv run --script`: the network is granted here for
 // dep fetching, and `uv run` would EXECUTE the untrusted tool's code with that
 // network access before the self-test gate — an exfiltration channel at adopt
-// time. `uv sync` populates the same cache without running the script.
+// time. `uv sync` populates the same cache without running the SCRIPT.
+//
+// RESIDUAL RISK (not yet closed): `uv sync` still builds any source-distribution
+// dependency, which runs that dependency's build backend with the granted
+// network. The env is sanitized, but the sandbox binds "/" read-only, so a
+// hostile build backend can still READ on-disk secrets (~/.ssh, ~/.aws) and
+// exfiltrate them over the network. Write-confinement does not prevent this.
+// Closing it means restricting the read surface (or network) of the build step
+// and needs testing against real uv tools — tracked, not fixed here.
 func warmUVCache(p config.Paths, workdir, scriptAbs, cacheAbs string) error {
 	argv, err := sandbox.Command(p.SandboxProfiles, workdir, sandbox.Perms{Network: true},
 		[]string{"uv", "sync", "--script", scriptAbs})
