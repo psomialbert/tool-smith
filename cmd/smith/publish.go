@@ -288,9 +288,11 @@ func originGitHubSlug() string {
 }
 
 // gitHubSlugFromURL extracts owner/name from a github.com remote URL, or "".
-// "github.com" must appear as a host boundary — preceded by start/"@"/"/" and
-// followed by ":" or "/" — so a look-alike host like "mygithub.company.com"
-// (which merely contains the substring "github.com") isn't mistaken for it.
+// "github.com" must appear as the HOST — at the start, right after "@"
+// (scp form), or right after "//" (scheme separator) — and be followed by
+// ":" or "/". A single "/" before it is a path segment, so a non-github host
+// with "github.com" in its PATH (https://evil.com/github.com/acme/x) or a
+// look-alike host (mygithub.company.com) is not mistaken for github.com.
 func gitHubSlugFromURL(url string) string {
 	const host = "github.com"
 	for off := 0; ; {
@@ -299,7 +301,7 @@ func gitHubSlugFromURL(url string) string {
 			return ""
 		}
 		i := off + rel
-		before := i == 0 || url[i-1] == '@' || url[i-1] == '/'
+		before := i == 0 || url[i-1] == '@' || (i >= 2 && url[i-1] == '/' && url[i-2] == '/')
 		end := i + len(host)
 		after := end < len(url) && (url[end] == ':' || url[end] == '/')
 		if before && after {

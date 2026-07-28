@@ -121,7 +121,7 @@ Usage:
   smith list [--json]            list tools adopted in this project (alias: status)
   smith allowlist [keygen|sign <file>|verify]  show the org adoption policy;
                                  subcommands manage an ed25519-signed allowlist
-  smith migrate                  clean up retired v1 files in SMITH_HOME
+  smith migrate [--quiet]        clean up retired v1 files in SMITH_HOME
                                  (backs them up first; safe to re-run)
   smith doctor [--fix] [--json] [--machine|--project]  diagnose machine + project
                                  health; --fix repairs safe issues (activation,
@@ -341,7 +341,7 @@ func cmdReview(p config.Paths, args []string) error {
 		arg = fs.Arg(0)
 	}
 	if arg == "" {
-		return fmt.Errorf("usage: smith review <repo|path|adopted-name> [--plain|--edit|--paths] [--editor <cmd>]")
+		return fmt.Errorf("usage: smith review <repo|path|adopted-name> [--inline|--plain|--edit|--paths] [--editor <cmd>]")
 	}
 
 	// Resolve to a bundle dir: an adopted tool, a local dir, or a clone.

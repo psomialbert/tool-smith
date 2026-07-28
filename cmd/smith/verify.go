@@ -108,6 +108,14 @@ func cmdVerify(p config.Paths, args []string) error {
 			fmt.Printf("  ✓ %s\n", r.Tool)
 		case "external":
 			fmt.Printf("  • %s: %s\n", r.Tool, r.Detail)
+		case "orphan":
+			// A warning by default (exit 0), a failure only under --frozen. Use a
+			// warning glyph so the line isn't a ✗ next to a green exit.
+			glyph := "⚠"
+			if *frozen {
+				glyph = "✗"
+			}
+			fmt.Printf("  %s %s: %s\n", glyph, r.Tool, r.Detail)
 		default:
 			fmt.Printf("  ✗ %s: %s\n", r.Tool, r.Detail)
 		}

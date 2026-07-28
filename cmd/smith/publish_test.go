@@ -19,6 +19,8 @@ func TestGitHubSlugFromURL(t *testing.T) {
 		"git@mygithub.company.com:acme/x.git": "", // look-alike host: not github.com
 		"https://github.company.com/acme/x":   "", // "github.com" not at a host boundary
 		"https://gitlab.com/acme/greet.git":   "",
+		"https://evil.com/github.com/acme/x":  "", // github.com in the PATH, not the host
+		"ssh://git@mirror/github.com/acme/x":  "", // ditto, non-github host
 	}
 	for url, want := range cases {
 		if got := gitHubSlugFromURL(url); got != want {

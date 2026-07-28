@@ -184,6 +184,13 @@ func TestVendoredShaCheckDetectsDrift(t *testing.T) {
 	if fs := c.diagnose(dc); fs[0].Severity != sevERROR {
 		t.Fatalf("drift → ERROR, got %+v", fs[0])
 	}
+	// A completely MISSING vendored dir must be reported as missing, not as a
+	// sha mismatch (bundleHash skips absent files → empty hash → false "≠ pin").
+	os.RemoveAll(filepath.Join(smithDir, "tools", "greet"))
+	fs := c.diagnose(dc)
+	if fs[0].Severity != sevERROR || !strings.Contains(fs[0].Message, "no vendored source") {
+		t.Fatalf("missing dir → 'no vendored source' error, got %+v", fs[0])
+	}
 }
 
 func TestInstalledCheckDetectsMissing(t *testing.T) {
