@@ -159,10 +159,16 @@ func TestCreateScaffoldsBundleWithReadme(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"greet", "selftest.sh", "SKILL.md", "manifest.yaml", "README.md"} {
+	for _, f := range []string{"greet", "selftest.sh", "SKILL.md", "manifest.yaml", "README.md", ".gitignore"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
 			t.Fatalf("scaffold missing %s: %v", f, err)
 		}
+	}
+	// The scaffolded .gitignore must keep secrets (the keygen default private
+	// key) out of a repo that could be published public.
+	gi, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil || !strings.Contains(string(gi), "smith-allowlist.key") {
+		t.Fatalf(".gitignore must ignore smith-allowlist.key, got: %q (err %v)", gi, err)
 	}
 	readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
 	if err != nil {

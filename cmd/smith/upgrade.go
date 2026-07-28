@@ -172,7 +172,7 @@ func cmdUpgrade(p config.Paths, args []string) error {
 		}
 		// adoptAtVersion only writes the pin on success, so a failed self-test
 		// (or clone/checkout) leaves the old pin + vendored source untouched.
-		if _, aerr := adoptAtVersion(p, t.Source, t.Source, want); aerr != nil {
+		if _, aerr := adoptAtVersion(p, t.Source, t.Source, want, name); aerr != nil {
 			failed = append(failed, failEntry{name, aerr.Error()})
 			continue
 		}

@@ -76,7 +76,10 @@ func cmdVerify(p config.Paths, args []string) error {
 	}
 
 	// Vendored dirs with no pin: a warning by default, a failure with --frozen.
-	orphans := vendoredOrphans(lock)
+	orphans, err := vendoredOrphans(lock)
+	if err != nil {
+		return err
+	}
 	for _, o := range orphans {
 		results = append(results, result{o, "orphan", "vendored but not in tools.yaml"})
 		if *frozen {
@@ -118,20 +121,29 @@ func cmdVerify(p config.Paths, args []string) error {
 	return nil
 }
 
-// vendoredOrphans returns entries under .smith/tools/ that have no entry in the
-// lockfile — unpinned tool dirs AND stray plain files (e.g. an executable
-// dropped directly under tools/, which sits outside any pinned tool's
-// unexpectedFiles scan). Under --frozen the tree must match the lockfile
-// exactly, so both are reported.
-func vendoredOrphans(lock ProjLock) []string {
+// vendoredOrphans returns entries under .smith/tools/ that have no business
+// being there: unpinned tool dirs, dirs pinned as external (mise) tools which
+// must have NO vendored source, AND stray plain files (e.g. an executable
+// dropped directly under tools/, outside any pinned tool's unexpectedFiles
+// scan). Under --frozen the tree must match the lockfile exactly, so all are
+// reported. A missing tools dir is legitimately zero orphans; any other read
+// error is returned (fail closed) rather than swallowed — the integrity gate
+// must never claim a match it couldn't verify.
+func vendoredOrphans(lock ProjLock) ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(smithDir, "tools"))
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("scanning %s/tools: %w", smithDir, err)
 	}
 	var orphans []string
 	for _, e := range entries {
 		if e.IsDir() {
-			if _, ok := lock.Tools[e.Name()]; !ok {
+			// An external (mise) tool is fetched via mise and vendors no source,
+			// so a dir bearing its name is unexpected — treat it as an orphan
+			// even though a lock entry exists.
+			if t, ok := lock.Tools[e.Name()]; !ok || t.isMise() {
 				orphans = append(orphans, e.Name())
 			}
 			continue
@@ -139,5 +151,5 @@ func vendoredOrphans(lock ProjLock) []string {
 		// A non-directory entry directly under tools/ is never a pinned tool.
 		orphans = append(orphans, e.Name())
 	}
-	return orphans
+	return orphans, nil
 }

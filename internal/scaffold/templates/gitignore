@@ -1,0 +1,14 @@
+# Never commit secrets — `smith publish` also refuses to, but keep them out of
+# the repo entirely. The keygen default private key first:
+smith-allowlist.key
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+id_rsa
+id_ed25519
+
+# Local build/scratch artifacts.
+.smith/

@@ -170,7 +170,10 @@ func staleConfigKeys(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, out, 0o644); err != nil {
+	// Atomic rewrite: a crash mid-write must not leave a truncated config.yaml
+	// that LoadFileConfig would then reject, blocking `use`/`install` until the
+	// user hand-repairs a file smith corrupted.
+	if err := writeFileAtomic(path, out, 0o644); err != nil {
 		return nil, err
 	}
 	return dropped, nil

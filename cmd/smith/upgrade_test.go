@@ -257,3 +257,51 @@ func TestDiffNumstatJSONParsing(t *testing.T) {
 		}
 	}
 }
+
+// TestUpgradeRefusesRename guards the duplicate+orphan bug: if a tool renames
+// itself in a newer version, `smith upgrade` must refuse (not vendor a second
+// tool under the new name, orphan the old pin+dir, and report false success).
+func TestUpgradeRefusesRename(t *testing.T) {
+	requireSandbox(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	p := testPaths(t)
+	repo := filepath.Join(t.TempDir(), "greet-repo")
+	if err := scaffold.Create(repo, scaffold.Manifest{
+		Name: "greet", Version: "0.1.0", Description: "greeter", Runtime: "bash",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	git := gitRunner(t, repo)
+	git("init", "-q")
+	git("add", "-A")
+	git("commit", "-qm", "v1")
+	git("tag", "v0.1.0")
+	// v0.2.0 renames the tool.
+	mf := filepath.Join(repo, "manifest.yaml")
+	raw, _ := os.ReadFile(mf)
+	os.WriteFile(mf, []byte(strings.Replace(string(raw), "name: greet", "name: greeter", 1)), 0o644)
+	git("add", "-A")
+	git("commit", "-qm", "v2")
+	git("tag", "v0.2.0")
+
+	proj := t.TempDir()
+	t.Chdir(proj)
+	if err := cmdUse(p, []string{repo + "@v0.1.0"}); err != nil {
+		t.Fatalf("adopt v0.1.0: %v", err)
+	}
+	// Upgrade must report failure (not false success) — the per-tool reason is
+	// the rename refusal; the aggregate error is enough to prove it didn't
+	// silently "succeed".
+	if err := cmdUpgrade(p, []string{"greet"}); err == nil {
+		t.Fatal("upgrade of a renamed tool must fail, not report success")
+	}
+	// No phantom second tool, old pin intact.
+	if _, statErr := os.Stat(filepath.Join(smithDir, "tools", "greeter")); statErr == nil {
+		t.Fatal("upgrade vendored a second tool under the new name")
+	}
+	if lock, _ := loadProjLock(); lock.Tools["greet"].Version != "v0.1.0" || len(lock.Tools) != 1 {
+		t.Fatalf("old pin should be untouched and sole entry, got %+v", lock.Tools)
+	}
+}

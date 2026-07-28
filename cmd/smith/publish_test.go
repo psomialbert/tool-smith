@@ -119,3 +119,86 @@ func TestPublishRequiresVisibility(t *testing.T) {
 		t.Fatal("publish must reject both --public and --private")
 	}
 }
+
+// TestSensitiveStagedPaths guards the `git add -A` secret-leak: publish must
+// refuse to commit files that look like secrets (the keygen default
+// smith-allowlist.key, private keys, .env), so a stray secret in a tool dir
+// isn't pushed to a public repo.
+func TestSensitiveStagedPaths(t *testing.T) {
+	staged := []string{
+		"manifest.yaml", "tool.py", "SKILL.md", // fine
+		"smith-allowlist.key", // the documented vector (keygen default)
+		"secrets/deploy.pem",  // private key, nested
+		".env",                // dotenv
+		".env.production",     // dotenv variant
+		"id_ed25519",          // ssh private key
+	}
+	got := sensitiveStagedPaths(staged)
+	want := map[string]bool{
+		"smith-allowlist.key": true, "secrets/deploy.pem": true,
+		".env": true, ".env.production": true, "id_ed25519": true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("flagged %v, want the %d secret-looking paths", got, len(want))
+	}
+	for _, g := range got {
+		if !want[g] {
+			t.Errorf("flagged non-secret %q", g)
+		}
+	}
+}
+
+func TestVisibilityMismatch(t *testing.T) {
+	cases := []struct {
+		wantPublic bool
+		actual     string
+		mismatch   bool
+	}{
+		{true, "PUBLIC", false},
+		{true, "private", true},
+		{false, "PRIVATE", false},
+		{false, "public", true},
+		{false, "internal", true}, // internal is not private
+		{true, "internal", true},  // nor public
+		{true, "", false},         // unknown: can't assert a mismatch
+	}
+	for _, c := range cases {
+		if got := visibilityMismatch(c.wantPublic, c.actual) != ""; got != c.mismatch {
+			t.Errorf("visibilityMismatch(public=%v, %q) mismatch=%v, want %v", c.wantPublic, c.actual, got, c.mismatch)
+		}
+	}
+}
+
+// TestPublishRefusesStagedSecret drives the real publish flow: a stray private
+// key in the tool dir must abort the publish before any commit/push.
+func TestPublishRefusesStagedSecret(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	t.Setenv("GIT_AUTHOR_NAME", "t")
+	t.Setenv("GIT_AUTHOR_EMAIL", "t@t")
+	t.Setenv("GIT_COMMITTER_NAME", "t")
+	t.Setenv("GIT_COMMITTER_EMAIL", "t@t")
+	p := testPaths(t)
+	tool := filepath.Join(t.TempDir(), "greet")
+	if err := scaffold.Create(tool, scaffold.Manifest{
+		Name: "greet", Version: "0.1.0", Description: "g", Runtime: "bash",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A local bare origin so a guard regression can never reach real GitHub.
+	bare := filepath.Join(t.TempDir(), "origin.git")
+	exec.Command("git", "init", "--bare", "-q", bare).Run()
+	exec.Command("git", "-C", tool, "init", "-q").Run()
+	exec.Command("git", "-C", tool, "remote", "add", "origin", bare).Run()
+	// A stray keygen key, force-staged past the scaffolded .gitignore — the
+	// backstop must catch a secret the ignore file didn't (e.g. a repo that
+	// predates it, or a force-add).
+	os.WriteFile(filepath.Join(tool, "smith-allowlist.key"), []byte("SECRET"), 0o600)
+	exec.Command("git", "-C", tool, "add", "-f", "smith-allowlist.key").Run()
+	t.Chdir(tool)
+	err := cmdPublish(p, []string{"--private"})
+	if err == nil || !strings.Contains(err.Error(), "look like secrets") {
+		t.Fatalf("publish must refuse a staged secret, got: %v", err)
+	}
+}
