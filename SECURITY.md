@@ -101,6 +101,22 @@ Be explicit — the gate is only as strong as these hold:
   `sandbox: { build: true }`, which is surfaced to the reviewer
   ("builds dependency source at adopt time…"); when opted in, the build backend
   runs with network and can read local files, so review it before adopting.
+- **The adopt-time sandbox can read the host filesystem.** Writes and network
+  are confined/denied and `$HOME` is redirected to a scratch dir, but reads of
+  absolute paths are not blocked, so code that legitimately runs at adopt time
+  (a `go build`, or a dependency build backend under `sandbox: { build: true }`)
+  could read files like `~/.ssh` via their absolute path. Masking the real home
+  was considered but would break the very builds `build: true` exists to enable
+  (uv/toolchains that read config/certs under home), so the mitigation is
+  keeping arbitrary builds off by default (above) and surfacing the opt-in.
+- **The install script trusts the release channel.** `scripts/install.sh`
+  downloads the binary and `SHA256SUMS` over HTTPS from GitHub Releases and
+  verifies the binary against the sums, but the sums themselves are not signed —
+  integrity against corruption/asset-swap, not authenticity against a compromised
+  release. Baking a release-signing public key into the installer (via `minisign`
+  or `cosign`) would close this; it needs a maintainer-held signing key and is a
+  release-process decision, not shipped here. Building from a cloned source tree
+  (the `cmd/smith/main.go` path) bypasses the download entirely.
 
 ## Scope for reports
 
