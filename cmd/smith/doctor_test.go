@@ -289,3 +289,12 @@ func TestDoctorEndToEndProjectFix(t *testing.T) {
 		t.Fatalf("greet should be materialized: %v", err)
 	}
 }
+
+// TestDoctorRejectsBothScopes: --machine and --project are mutually exclusive;
+// passing both must error, not silently pick one.
+func TestDoctorRejectsBothScopes(t *testing.T) {
+	err := cmdDoctor(testPaths(t), []string{"--machine", "--project"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("--machine --project must error, got: %v", err)
+	}
+}

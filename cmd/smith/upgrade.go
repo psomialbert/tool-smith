@@ -143,8 +143,22 @@ func cmdUpgrade(p config.Paths, args []string) error {
 			// recorded version doesn't drift stale from mise.toml.
 			if targetName != "" {
 				spec := strings.TrimPrefix(t.Source, "mise:")
-				if err := cmdUseMise(p, spec, targetVer); err != nil {
+				if err := cmdUseMise(p, spec, targetVer, *asJSON); err != nil {
 					return err
+				}
+				if *asJSON {
+					// Keep the machine-readable contract: emit the same shape as a
+					// vendored upgrade instead of cmdUseMise's human prose. Reload
+					// the lock to report the version mise actually resolved+pinned.
+					to := targetVer
+					if l2, lerr := loadProjLock(); lerr == nil {
+						to = l2.Tools[name].Version
+					}
+					return jsonPrint(map[string]any{
+						"upgraded": []upEntry{{name, t.Version, to}},
+						"uptodate": []string{}, "failed": []failEntry{},
+						"skipped_external": []string{},
+					})
 				}
 				return nil
 			}

@@ -46,7 +46,7 @@ cross:
 	    -ldflags "-X main.version=$(VERSION)" -o dist/smith-$$p ./cmd/smith || exit 1; \
 	done
 	@cp skills/cli-creator/SKILL.md dist/cli-creator-SKILL.md
-	@cd dist && { command -v sha256sum >/dev/null 2>&1 && sha256sum smith-* cli-creator-SKILL.md || shasum -a 256 smith-* cli-creator-SKILL.md; } > SHA256SUMS
+	@cd dist && if command -v sha256sum >/dev/null 2>&1; then sha256sum smith-* cli-creator-SKILL.md > SHA256SUMS; else shasum -a 256 smith-* cli-creator-SKILL.md > SHA256SUMS; fi
 	@echo "cross-compiled $(VERSION) -> dist/ (binaries + cli-creator-SKILL.md + SHA256SUMS)"
 
 test:

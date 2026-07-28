@@ -498,7 +498,7 @@ func cmdUse(p config.Paths, args []string) error {
 	}
 	source := rest[0]
 	if mise {
-		return cmdUseMise(p, source, version)
+		return cmdUseMise(p, source, version, false)
 	}
 	// Allow trailing @ref when the source isn't a scheme/auth URL.
 	if version == "" && !strings.Contains(source, "://") && !strings.Contains(source, "git@") {
@@ -540,7 +540,7 @@ then run `+"`smith install`"+` to put it on PATH for this project.
 // Unlike a smith tool there's no source to vendor or self-test — the reviewable
 // artifact is the mise.toml pin. smith records it in .smith/tools.yaml (runtime
 // mise) for a unified `smith list`; `smith install` runs `mise install`.
-func cmdUseMise(p config.Paths, spec, version string) error {
+func cmdUseMise(p config.Paths, spec, version string, quiet bool) error {
 	if version == "" { // trailing @ver on the spec, e.g. ubi:DataDog/pup@1.2.3
 		if at := strings.LastIndex(spec, "@"); at > 0 {
 			version, spec = spec[at+1:], spec[:at]
@@ -609,6 +609,9 @@ func cmdUseMise(p config.Paths, spec, version string) error {
 		return err
 	}
 
+	if quiet {
+		return nil
+	}
 	fmt.Printf("adopted %s@%s (external, via mise)\n", spec, version)
 	fmt.Printf(`  pinned in mise.toml + recorded in %s — no source vendored (external tool)
 
@@ -996,15 +999,16 @@ func cmdInstall(p config.Paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	miseTools := false
+	var vendored, external []string
 	for _, name := range names {
 		t := lock.Tools[name]
 		if t.isMise() {
 			// External tool: no vendored source to verify/materialize; mise
 			// fetches it from mise.toml below.
-			miseTools = true
+			external = append(external, name)
 			continue
 		}
+		vendored = append(vendored, name)
 		dir := filepath.Join(smithDir, "tools", name)
 		// Integrity: vendored source must match the pinned hash (catches a
 		// tampered/edited vendored tree vs the reviewed lockfile).
@@ -1030,7 +1034,7 @@ func cmdInstall(p config.Paths, args []string) error {
 	// External (mise) tools are pinned in mise.toml; fetch them via mise. A
 	// failure here means a pinned external CLI is absent from PATH, so fail
 	// closed — otherwise CI/teammates get exit 0 with a missing tool.
-	if miseTools {
+	if len(external) > 0 {
 		mi := exec.Command("mise", "install")
 		mi.Stdout, mi.Stderr = os.Stderr, os.Stderr
 		if err := mi.Run(); err != nil {
@@ -1079,8 +1083,14 @@ func cmdInstall(p config.Paths, args []string) error {
 		}
 	}
 
-	fmt.Printf("installed %d tool(s) on PATH for this project (via %s)\n", len(names), binDir)
-	fmt.Printf("  %s\n", strings.Join(names, ", "))
+	if len(vendored) > 0 {
+		fmt.Printf("installed %d tool(s) on PATH for this project (via %s)\n", len(vendored), binDir)
+		fmt.Printf("  %s\n", strings.Join(vendored, ", "))
+	}
+	if len(external) > 0 {
+		fmt.Printf("fetched %d external tool(s) via mise (mise.toml)\n", len(external))
+		fmt.Printf("  %s\n", strings.Join(external, ", "))
+	}
 	fmt.Println("activation needs mise in your shell (`mise activate`) or `mise exec`")
 	return nil
 }

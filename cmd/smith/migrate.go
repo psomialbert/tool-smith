@@ -61,9 +61,9 @@ func cmdMigrate(p config.Paths, args []string) error {
 		return nil
 	}
 	moved, dropped, backup, err := applyV1Migrate(p)
-	if err != nil {
-		return err
-	}
+	// Report what already happened even if a later step failed: the dir backups
+	// run before the config strip, so on a strip error the user must still be
+	// told their v1 dirs were relocated (else they can't find them).
 	for _, name := range moved {
 		say("  moved v1 %s → %s", name, backup)
 	}
@@ -73,7 +73,7 @@ func cmdMigrate(p config.Paths, args []string) error {
 	if len(dropped) > 0 {
 		say("  stripped retired config key(s): %s", strings.Join(dropped, ", "))
 	}
-	return nil
+	return err
 }
 
 // diagnoseV1Home reports retired v1 artifacts present in SMITH_HOME and dead

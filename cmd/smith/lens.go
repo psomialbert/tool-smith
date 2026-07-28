@@ -36,7 +36,13 @@ func cmdLens(p config.Paths, args []string) error {
 	entries := make([]entry, 0, len(names))
 	for _, name := range names {
 		t := lock.Tools[name]
-		e := entry{Name: name, Version: t.Version, Runtime: t.Runtime, External: t.isMise(), Invoke: name + " --json …"}
+		// Vendored smith tools honor the `<tool> --json` contract; external mise
+		// CLIs don't promise it, so don't advertise it for them.
+		invoke := name + " --json …"
+		if t.isMise() {
+			invoke = name
+		}
+		e := entry{Name: name, Version: t.Version, Runtime: t.Runtime, External: t.isMise(), Invoke: invoke}
 		if t.isMise() {
 			e.Trigger = "external CLI via mise (" + t.Source + ") — no source reviewed"
 		} else if d := skillDescription(filepath.Join(smithDir, "tools", name, "SKILL.md")); d != "" {
