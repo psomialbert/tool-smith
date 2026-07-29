@@ -63,7 +63,7 @@ func projectToolIndex(lock ProjLock) []toolEntry {
 
 // triggerMaxLen caps an emitted trigger: long enough for a real trigger
 // sentence, short enough that one tool cannot dominate an agent's context.
-const triggerMaxLen = 300
+const triggerMaxLen = 500
 
 // sanitizeTrigger makes a tool's description safe to embed as a table row in an
 // agent instruction file. The description is reviewed at adoption, so this
@@ -120,9 +120,9 @@ func truncateValidUTF8(s string, n int) string {
 }
 
 // escapeTableCell makes a value safe to embed as a table cell in the
-// rendered block. Unlike sanitizeTrigger, it does not collapse whitespace or
-// cap length — Name, Version, and Invoke aren't free-text descriptions — but
-// it must still close the same two holes sanitizeTrigger closes for Trigger:
+// rendered block. Unlike sanitizeTrigger, it does not cap length — Name,
+// Version, and Invoke aren't free-text descriptions — but it must still close
+// the same holes sanitizeTrigger closes for Trigger:
 //
 //   - HTML comment syntax is stripped (reusing stripHTMLComments' fixpoint
 //     loop) so a hostile Name/Version/Invoke — e.g. a git tag like
@@ -132,9 +132,16 @@ func truncateValidUTF8(s string, n int) string {
 //     and treats everything past it as untouched tail; a forged marker here
 //     would truncate the managed block early and let attacker-controlled
 //     content become a permanent fixture outside it, immune to regeneration.
+//   - newlines/whitespace runs collapse to a single space, so a value like a
+//     hand-edited tools.yaml Version containing "\n\n## OVERRIDE\n..." can't
+//     break out of its table row and render as extra markdown lines —
+//     including a heading — inside the managed block. The renderer owns the
+//     table's structure, so it can't rely on Name/Version/Invoke staying
+//     single-line just because they usually are.
 //   - `|` is escaped so it cannot forge table columns.
 func escapeTableCell(s string) string {
 	s = stripHTMLComments(s)
+	s = strings.Join(strings.Fields(s), " ") // collapses \n, \r\n, tabs, runs
 	return strings.ReplaceAll(s, "|", `\|`)
 }
 
@@ -258,10 +265,9 @@ func resolveTargets(fc config.FileConfig) []string {
 	return out
 }
 
-// emitCtx is what an emitter needs: resolved paths (for SkillsDir), the loaded
-// file config, and the project root (the dir holding .smith/).
+// emitCtx is what an emitter needs: the loaded file config (SkillsDir is
+// reached via fc) and the project root (the dir holding .smith/).
 type emitCtx struct {
-	p          config.Paths
 	fc         config.FileConfig
 	projectDir string
 }

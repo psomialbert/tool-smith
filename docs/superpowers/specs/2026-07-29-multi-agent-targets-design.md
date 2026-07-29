@@ -158,7 +158,7 @@ emission:
 
 - collapse newlines/runs of whitespace to single spaces (one table row)
 - escape `|` (table structure)
-- cap at 300 characters, ellipsized — long enough for a real trigger, short
+- cap at 500 characters, ellipsized — long enough for a real trigger, short
   enough that one tool cannot dominate the agent's context
 - **strip HTML comment syntax** (`<!--` / `-->`)
 

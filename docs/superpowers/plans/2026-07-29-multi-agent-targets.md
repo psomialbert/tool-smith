@@ -16,7 +16,7 @@ Spec: `docs/superpowers/specs/2026-07-29-multi-agent-targets-design.md`
 - Before pushing: `make test` + `mise exec -- go vet ./...` + `mise exec -- gofmt -l .` (must print nothing).
 - `main` is protected. Land via PR. Work on branch `feat/multi-agent-targets`.
 - Commit trailer: `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`
-- Trigger sanitization cap: **300 characters**, ellipsized.
+- Trigger sanitization cap: **500 characters**, ellipsized.
 - Managed block markers: begin detected by the stable prefix `<!-- smith:begin`, end is exactly `<!-- smith:end -->`.
 - Emission failures **warn to stderr and never fail `smith install`** (matches the existing skill export at `adopt.go:1083`).
 - smith **never creates** `AGENTS.md`/`CLAUDE.md` during `install`. Only `doctor --fix` creates, and only `AGENTS.md`.
@@ -274,12 +274,12 @@ func TestSanitizeTrigger(t *testing.T) {
 
 func TestSanitizeTriggerCapsLength(t *testing.T) {
 	long := ""
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 700; i++ {
 		long += "x"
 	}
 	got := sanitizeTrigger(long)
-	if len(got) > 300 {
-		t.Errorf("trigger not capped: len = %d, want <= 300", len(got))
+	if len(got) > 500 {
+		t.Errorf("trigger not capped: len = %d, want <= 500", len(got))
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("truncated trigger should be ellipsized, got tail %q", got[len(got)-1:])
@@ -320,7 +320,7 @@ Add to `cmd/smith/agents.go` (and add `"strings"` to its imports):
 ```go
 // triggerMaxLen caps an emitted trigger: long enough for a real trigger
 // sentence, short enough that one tool cannot dominate an agent's context.
-const triggerMaxLen = 300
+const triggerMaxLen = 500
 
 // sanitizeTrigger makes a tool's description safe to embed as a table row in an
 // agent instruction file. The description is reviewed at adoption, so this
@@ -360,7 +360,7 @@ git commit -m "feat: sanitize tool triggers before emitting them to agents
 A description becomes agent instructions once emitted, so strip HTML comment
 syntax (a forged \`smith:end\` would inject content outside the managed block,
 where regeneration never overwrites it), collapse to one line, escape table
-pipes, and cap at 300 chars.
+pipes, and cap at 500 chars.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```

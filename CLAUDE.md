@@ -65,8 +65,14 @@ sync silently. **Before committing, verify each still matches actual behavior:**
 - **Add an agent target** (`agentTargets()` in `cmd/smith/agents.go`) → give it a
   `scope` (machine vs project — the claude export is machine-global, see the
   multi-agent spec's Known limits), keep `emit` idempotent (a non-idempotent
-  emitter churns a tracked file on every `smith install`), and document it in
-  `README.md` + the `agents.targets` list.
+  emitter churns a tracked file on every `smith install`) and rendering
+  LF-only (`upsertManagedBlock` trims the caller's block with cutset `"\n"`
+  only, so a CRLF-terminated block leaves a dangling `\r`), and document it in
+  `README.md` + the `agents.targets` list. If it's a new `*-md` file target,
+  also add it to `agentInstructionFiles` and `agentMdTargetNames`
+  (`cmd/smith/doctor.go`) — those are what let `smith doctor`'s `agents-block`
+  check see it at all; forgetting them means doctor silently stops checking
+  the new target.
 
 ## Human-owned commands
 
