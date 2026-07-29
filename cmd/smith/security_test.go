@@ -150,3 +150,16 @@ func TestSanitizeTriggerCannotEscapeManagedBlock(t *testing.T) {
 		t.Fatalf("newline survived; injected text must stay on the table row: %q", got)
 	}
 }
+
+// TestSanitizeTriggerStripsNestedMarkers guards against a single-pass replace
+// being non-idempotent: "<!-<!---->->" sanitizes to "<!-->" after removing
+// "<!--" and "-->" once, but that result still contains "<!--" — a forged
+// marker that survived because the two halves were assembled by the very
+// removal that was supposed to eliminate them. Stripping must repeat to a
+// fixpoint so a split/nested marker can't reconstitute itself.
+func TestSanitizeTriggerStripsNestedMarkers(t *testing.T) {
+	got := sanitizeTrigger("<!-<!---->->")
+	if strings.Contains(got, "<!--") || strings.Contains(got, "-->") {
+		t.Fatalf("nested/split HTML comment markers survived sanitization: %q", got)
+	}
+}

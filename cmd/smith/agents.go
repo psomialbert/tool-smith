@@ -8,6 +8,7 @@ package main
 import (
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 // toolEntry is one adopted tool as presented to an agent. Shared by `smith
@@ -71,13 +72,44 @@ const triggerMaxLen = 300
 //   - `|` is escaped so it cannot forge table columns.
 //   - length is capped.
 func sanitizeTrigger(s string) string {
-	s = strings.NewReplacer("<!--", "", "-->", "").Replace(s)
+	s = stripHTMLComments(s)
 	s = strings.Join(strings.Fields(s), " ") // collapses \n, \r\n, tabs, runs
 	s = strings.ReplaceAll(s, "|", `\|`)
 	if len(s) > triggerMaxLen {
 		// "…" (U+2026) is 3 bytes in UTF-8, so reserve room for all of them —
 		// s[:triggerMaxLen-1] would leave the result 2 bytes over cap.
-		s = strings.TrimSpace(s[:triggerMaxLen-3]) + "…"
+		s = strings.TrimSpace(truncateValidUTF8(s, triggerMaxLen-3)) + "…"
+	}
+	return s
+}
+
+// stripHTMLComments removes "<!--" and "-->" substrings, repeating to a
+// fixpoint. A single pass is not idempotent: "<!-<!---->->" sanitizes to
+// "<!-->" after one pass, which still contains "<!--". Each pass strictly
+// shortens the string (or leaves it unchanged), so this always terminates.
+func stripHTMLComments(s string) string {
+	for {
+		next := strings.NewReplacer("<!--", "", "-->", "").Replace(s)
+		if next == s {
+			return next
+		}
+		s = next
+	}
+}
+
+// truncateValidUTF8 returns a prefix of s at most n bytes, trimmed back off
+// any rune that a raw byte slice at n would otherwise cut in half — a plain
+// s[:n] can land mid-rune and emit invalid UTF-8 (e.g. the real "external CLI
+// via mise (…) — no source reviewed" trigger contains a multi-byte em dash).
+func truncateValidUTF8(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	if len(s) > n {
+		s = s[:n]
+	}
+	for !utf8.ValidString(s) {
+		s = s[:len(s)-1]
 	}
 	return s
 }

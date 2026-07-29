@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // writeToolSkill creates .smith/tools/<name>/SKILL.md with the given description
@@ -99,5 +100,24 @@ func TestSanitizeTriggerCapsLength(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("truncated trigger should be ellipsized, got tail %q", got[len(got)-1:])
+	}
+}
+
+// TestSanitizeTriggerCapsLengthUTF8 guards against a raw byte-slice truncation
+// landing mid-rune. The real external-tool trigger ("external CLI via mise
+// (…) — no source reviewed") already contains multi-byte runes (the ellipsis,
+// an em dash), so this isn't hypothetical: a cut that ignores rune boundaries
+// can emit invalid UTF-8 while still satisfying the byte-length cap.
+func TestSanitizeTriggerCapsLengthUTF8(t *testing.T) {
+	long := strings.Repeat("世", 200) // 3 bytes/rune; padded below to shift the
+	for pad := 0; pad <= 5; pad++ {  // truncation cut across every byte offset
+		in := long + strings.Repeat("x", pad)
+		got := sanitizeTrigger(in)
+		if !utf8.ValidString(got) {
+			t.Errorf("pad=%d: sanitizeTrigger produced invalid UTF-8: %q", pad, got)
+		}
+		if len(got) > 300 {
+			t.Errorf("pad=%d: trigger not capped: len = %d, want <= 300", pad, len(got))
+		}
 	}
 }
