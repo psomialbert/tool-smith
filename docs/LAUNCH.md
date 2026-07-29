@@ -54,7 +54,7 @@ The installer downloads release assets over plain https once the repo is public
 
 ## What's shipped
 
-Released through **v2.12.0**. Command surface: `new · publish · search · use ·
+Released through **v2.13.0**. Command surface: `new · publish · search · use ·
 use --mise · review · install · upgrade · diff · verify · lens · list ·
 allowlist (keygen/sign/verify) · migrate · doctor`.
 
