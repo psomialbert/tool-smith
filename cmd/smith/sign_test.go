@@ -61,14 +61,14 @@ func TestAllowlistPatternsFailClosed(t *testing.T) {
 	fc := config.FileConfig{Allowlist: config.AllowlistConfig{File: al, PublicKey: pub}}
 
 	// public_key set but no signature yet → fail closed.
-	if _, err := allowlistPatterns(fc); err == nil {
+	if _, err := allowlistPatterns(fc, dir); err == nil {
 		t.Fatal("unsigned file with public_key configured must fail closed")
 	}
 	// Sign → patterns load.
 	if err := allowlistSign([]string{"--key", keyPath, al}); err != nil {
 		t.Fatal(err)
 	}
-	pats, err := allowlistPatterns(fc)
+	pats, err := allowlistPatterns(fc, dir)
 	if err != nil {
 		t.Fatalf("signed file should load: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestAllowlistPatternsFailClosed(t *testing.T) {
 	}
 	// Tamper after signing → fail closed again.
 	os.WriteFile(al, []byte("github.com/evil/*\n"), 0o644)
-	if _, err := allowlistPatterns(fc); err == nil {
+	if _, err := allowlistPatterns(fc, dir); err == nil {
 		t.Fatal("a tampered signed allowlist must fail closed")
 	}
 }
@@ -105,7 +105,7 @@ func TestUnsignedAllowlistStillWorksWithoutPublicKey(t *testing.T) {
 	os.WriteFile(al, []byte("github.com/acme/*\n"), 0o644)
 	// No public_key → signing not required (backward compatible).
 	fc := config.FileConfig{Allowlist: config.AllowlistConfig{File: al}}
-	pats, err := allowlistPatterns(fc)
+	pats, err := allowlistPatterns(fc, dir)
 	if err != nil || len(pats) != 1 {
 		t.Fatalf("unsigned allowlist without public_key must work: %v %v", pats, err)
 	}
@@ -133,5 +133,42 @@ func TestKeygenRefusesDanglingSymlink(t *testing.T) {
 	os.WriteFile(plain, []byte("x"), 0o600)
 	if err := allowlistKeygen([]string{"--out", plain}); err == nil {
 		t.Fatal("keygen must refuse to overwrite an existing file")
+	}
+}
+
+// TestAllowlistRollbackBlocked: a valid signature proves authenticity, not
+// freshness. An attacker controlling the (less-trusted) allowlist file location
+// could serve an OLD, validly-signed, WIDER allowlist. A version below the
+// highest previously accepted must be rejected.
+func TestAllowlistRollbackBlocked(t *testing.T) {
+	home := t.TempDir()
+	keyPath := filepath.Join(home, "k.key")
+	if err := allowlistKeygen([]string{"--out", keyPath}); err != nil {
+		t.Fatal(err)
+	}
+	pub := pubFromKeyFile(t, keyPath)
+	al := filepath.Join(t.TempDir(), "allow.txt")
+	fc := config.FileConfig{Allowlist: config.AllowlistConfig{File: al, PublicKey: pub}}
+
+	sign := func(body string) {
+		os.WriteFile(al, []byte(body), 0o644)
+		if err := allowlistSign([]string{"--key", keyPath, al}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// v2 accepted → high-water-mark = 2.
+	sign("# smith-allowlist-version: 2\ngithub.com/acme/*\n")
+	if _, err := allowlistPatterns(fc, home); err != nil {
+		t.Fatalf("v2 should load: %v", err)
+	}
+	// Roll back to a validly-signed, wider v1 → blocked.
+	sign("# smith-allowlist-version: 1\ngithub.com/*\n")
+	if _, err := allowlistPatterns(fc, home); err == nil || !strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("rollback to older signed version must be blocked, got: %v", err)
+	}
+	// Moving forward to v3 is accepted.
+	sign("# smith-allowlist-version: 3\ngithub.com/acme/*\n")
+	if _, err := allowlistPatterns(fc, home); err != nil {
+		t.Fatalf("v3 (forward) should load: %v", err)
 	}
 }

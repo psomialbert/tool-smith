@@ -27,6 +27,11 @@ func TestLensMarkdownAndJSON(t *testing.T) {
 			t.Fatalf("lens json missing %q:\n%s", want, js)
 		}
 	}
+	// An external mise CLI doesn't promise the `<tool> --json` contract, so its
+	// invoke hint must not advertise it.
+	if strings.Contains(js, "pup --json") {
+		t.Fatalf("mise tool must not claim the --json contract:\n%s", js)
+	}
 }
 
 func TestLensEmpty(t *testing.T) {

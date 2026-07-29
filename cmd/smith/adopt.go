@@ -22,6 +22,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -174,8 +175,6 @@ func buildGoTool(dir, outAbs string) error {
 	return cmd.Run()
 }
 
-// uvLockScript runs `uv lock --script` if the lockfile is absent, so the
-// vendored source carries a hash-locked dependency tree.
 // noBuildHint appends adoption guidance when a uv step failed and source builds
 // were forbidden — the likely cause is a dependency with no wheel. Empty when
 // the tool already opted into builds (then the failure is something else).
@@ -365,7 +364,7 @@ func unexpectedFiles(dir string, expected []string) ([]string, error) {
 
 // allowlistPatterns returns the org's permitted-source patterns: config
 // allowlist.repos plus lines from allowlist.file. Empty = no policy.
-func allowlistPatterns(fc config.FileConfig) ([]string, error) {
+func allowlistPatterns(fc config.FileConfig, homeDir string) ([]string, error) {
 	pats := append([]string(nil), fc.Allowlist.Repos...)
 	if fc.Allowlist.File != "" {
 		// Read the allowlist ONCE, then verify those exact bytes: the bytes we
@@ -382,6 +381,13 @@ func allowlistPatterns(fc config.FileConfig) ([]string, error) {
 			if err := verifyAllowlistData(fc.Allowlist.File, raw, fc.Allowlist.PublicKey); err != nil {
 				return nil, fmt.Errorf("allowlist signature check failed — adoptions blocked: %w", err)
 			}
+			// A valid signature proves authenticity, not freshness: an attacker
+			// controlling the (less-trusted) allowlist file location could serve
+			// an OLD, validly-signed, WIDER allowlist. Reject a version below the
+			// highest we've accepted.
+			if err := checkAllowlistFreshness(homeDir, raw); err != nil {
+				return nil, err
+			}
 		}
 		for _, line := range strings.Split(string(raw), "\n") {
 			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
@@ -390,6 +396,47 @@ func allowlistPatterns(fc config.FileConfig) ([]string, error) {
 		}
 	}
 	return pats, nil
+}
+
+// allowlistVersion reads the `# smith-allowlist-version: N` directive from a
+// signed allowlist file (0 if absent/unparseable). It is a comment to the
+// pattern parser, and being inside the signed bytes it can't be altered without
+// invalidating the signature — so it's a trustworthy monotonic counter.
+func allowlistVersion(data []byte) int {
+	const pfx = "# smith-allowlist-version:"
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, pfx) {
+			if n, err := strconv.Atoi(strings.TrimSpace(line[len(pfx):])); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// checkAllowlistFreshness rejects a signed allowlist whose version is below the
+// highest previously accepted (rollback), and records the new high-water-mark.
+// The mark lives in $SMITH_HOME (same trust level as the public key), so an
+// attacker who can only rewrite the less-trusted allowlist file can't reset it.
+// Trust-on-first-use: the first accepted version sets the baseline.
+func checkAllowlistFreshness(homeDir string, data []byte) error {
+	ver := allowlistVersion(data)
+	hwmPath := filepath.Join(homeDir, "allowlist.hwm")
+	hwm := 0
+	if raw, err := os.ReadFile(hwmPath); err == nil {
+		hwm, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+	}
+	if ver < hwm {
+		return fmt.Errorf("allowlist rollback blocked: file version %d is older than the last-accepted %d (an old signed allowlist may be being served); if this downgrade is intentional, remove %s", ver, hwm, hwmPath)
+	}
+	if ver > hwm {
+		if err := os.MkdirAll(homeDir, 0o755); err == nil {
+			if werr := writeFileAtomic(hwmPath, []byte(strconv.Itoa(ver)+"\n"), 0o644); werr != nil {
+				fmt.Fprintf(os.Stderr, "[smith] warning: could not persist allowlist version high-water-mark: %v\n", werr)
+			}
+		}
+	}
+	return nil
 }
 
 // allowlistPermits reports whether source (or its expanded URL) matches any
@@ -451,7 +498,7 @@ func cmdUse(p config.Paths, args []string) error {
 	}
 	source := rest[0]
 	if mise {
-		return cmdUseMise(p, source, version)
+		return cmdUseMise(p, source, version, false)
 	}
 	// Allow trailing @ref when the source isn't a scheme/auth URL.
 	if version == "" && !strings.Contains(source, "://") && !strings.Contains(source, "git@") {
@@ -468,7 +515,7 @@ func cmdUse(p config.Paths, args []string) error {
 	if err != nil {
 		return fmt.Errorf("reading %s (fix or remove it): %w", filepath.Join(p.Home, "config.yaml"), err)
 	}
-	if pats, perr := allowlistPatterns(fc); perr != nil {
+	if pats, perr := allowlistPatterns(fc, p.Home); perr != nil {
 		return perr
 	} else if len(pats) > 0 && !allowlistPermits(pats, source, clonedURL) {
 		return fmt.Errorf("adoption blocked: %q matches no allowlist pattern.\n  allowed: %s\n  (policy in %s)",
@@ -493,7 +540,7 @@ then run `+"`smith install`"+` to put it on PATH for this project.
 // Unlike a smith tool there's no source to vendor or self-test — the reviewable
 // artifact is the mise.toml pin. smith records it in .smith/tools.yaml (runtime
 // mise) for a unified `smith list`; `smith install` runs `mise install`.
-func cmdUseMise(p config.Paths, spec, version string) error {
+func cmdUseMise(p config.Paths, spec, version string, quiet bool) error {
 	if version == "" { // trailing @ver on the spec, e.g. ubi:DataDog/pup@1.2.3
 		if at := strings.LastIndex(spec, "@"); at > 0 {
 			version, spec = spec[at+1:], spec[:at]
@@ -510,7 +557,7 @@ func cmdUseMise(p config.Paths, spec, version string) error {
 	if err != nil {
 		return fmt.Errorf("reading %s (fix or remove it): %w", filepath.Join(p.Home, "config.yaml"), err)
 	}
-	if pats, perr := allowlistPatterns(fc); perr != nil {
+	if pats, perr := allowlistPatterns(fc, p.Home); perr != nil {
 		return perr
 	} else if len(pats) > 0 {
 		repo := spec
@@ -562,6 +609,9 @@ func cmdUseMise(p config.Paths, spec, version string) error {
 		return err
 	}
 
+	if quiet {
+		return nil
+	}
 	fmt.Printf("adopted %s@%s (external, via mise)\n", spec, version)
 	fmt.Printf(`  pinned in mise.toml + recorded in %s — no source vendored (external tool)
 
@@ -949,15 +999,16 @@ func cmdInstall(p config.Paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	miseTools := false
+	var vendored, external []string
 	for _, name := range names {
 		t := lock.Tools[name]
 		if t.isMise() {
 			// External tool: no vendored source to verify/materialize; mise
 			// fetches it from mise.toml below.
-			miseTools = true
+			external = append(external, name)
 			continue
 		}
+		vendored = append(vendored, name)
 		dir := filepath.Join(smithDir, "tools", name)
 		// Integrity: vendored source must match the pinned hash (catches a
 		// tampered/edited vendored tree vs the reviewed lockfile).
@@ -983,7 +1034,7 @@ func cmdInstall(p config.Paths, args []string) error {
 	// External (mise) tools are pinned in mise.toml; fetch them via mise. A
 	// failure here means a pinned external CLI is absent from PATH, so fail
 	// closed — otherwise CI/teammates get exit 0 with a missing tool.
-	if miseTools {
+	if len(external) > 0 {
 		mi := exec.Command("mise", "install")
 		mi.Stdout, mi.Stderr = os.Stderr, os.Stderr
 		if err := mi.Run(); err != nil {
@@ -1032,8 +1083,14 @@ func cmdInstall(p config.Paths, args []string) error {
 		}
 	}
 
-	fmt.Printf("installed %d tool(s) on PATH for this project (via %s)\n", len(names), binDir)
-	fmt.Printf("  %s\n", strings.Join(names, ", "))
+	if len(vendored) > 0 {
+		fmt.Printf("installed %d tool(s) on PATH for this project (via %s)\n", len(vendored), binDir)
+		fmt.Printf("  %s\n", strings.Join(vendored, ", "))
+	}
+	if len(external) > 0 {
+		fmt.Printf("fetched %d external tool(s) via mise (mise.toml)\n", len(external))
+		fmt.Printf("  %s\n", strings.Join(external, ", "))
+	}
 	fmt.Println("activation needs mise in your shell (`mise activate`) or `mise exec`")
 	return nil
 }

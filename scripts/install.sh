@@ -156,6 +156,8 @@ download_release() {
   if [ "$got_skill" = 1 ]; then
     install -m 0644 "$tmp/cli-creator-SKILL.md" "$skill_dst"
     skill_installed=1
+  else
+    echo "warning: release $tag has no cli-creator-SKILL.md asset — installed the binary but not the authoring skill (agents won't get the cli-creator flow). Re-cut the release with the skill asset." >&2
   fi
 }
 

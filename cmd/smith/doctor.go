@@ -317,6 +317,10 @@ func doctorChecks() []check {
 					f.Severity = sevERROR
 					f.Message = "mise.local.toml has a non-smith _.path"
 					f.FixHint = "edit mise.local.toml to add " + binDir
+				case "unreadable":
+					f.Severity = sevERROR
+					f.Message = "mise.local.toml is unreadable"
+					f.FixHint = "fix its permissions, then re-run `smith install`"
 				default:
 					f.Severity = sevERROR
 					f.Fixable = true
@@ -534,6 +538,9 @@ func cmdDoctor(p config.Paths, args []string) error {
 	onlyProject := fs.Bool("project", false, "run project checks only")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *onlyMachine && *onlyProject {
+		return fmt.Errorf("--machine and --project are mutually exclusive (omit both to check machine + project)")
 	}
 	dc := resolveDocCtx(p)
 	checks := doctorChecks()

@@ -297,7 +297,7 @@ func cmdAllowlist(p config.Paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	pats, err := allowlistPatterns(fc)
+	pats, err := allowlistPatterns(fc, p.Home)
 	if err != nil {
 		// A signature failure blocks adoptions; surface it here too.
 		return err
@@ -682,7 +682,7 @@ func activationState(projectDir, binDir string) string {
 		return "missing"
 	}
 	if err != nil {
-		return "foreign" // unreadable: refuse to touch
+		return "unreadable" // permission/IO error: refuse to touch, distinct from a foreign _.path
 	}
 	text := string(raw)
 	// Match the exact quoted path the writer emits (`_.path = ["<binDir>"]`),
@@ -732,6 +732,8 @@ func ensureActivation(projectDir, binDir string) error {
 		return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
 	case "foreign":
 		return fmt.Errorf("mise.local.toml already sets env._.path; add %q to it manually", binDir)
+	case "unreadable":
+		return fmt.Errorf("mise.local.toml is unreadable (fix its permissions), so smith won't modify it")
 	default: // inject
 		raw, _ := os.ReadFile(path)
 		text := string(raw)
