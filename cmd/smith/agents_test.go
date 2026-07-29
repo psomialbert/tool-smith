@@ -393,6 +393,68 @@ func TestRenderAgentBlockSanitizesTriggers(t *testing.T) {
 	}
 }
 
+// TestRenderAgentBlockEscapesPipesInNameVersionInvoke guards against table
+// corruption from a field other than Trigger. Name is constrained by
+// scaffold.ValidToolName today, but Version comes straight from a git ref
+// (a legal git tag can contain "|") and the lockfile is hand-editable, so
+// the renderer must not rely on that upstream invariant: every cell needs to
+// be escaped to keep the row at exactly 4 columns.
+func TestRenderAgentBlockEscapesPipesInNameVersionInvoke(t *testing.T) {
+	tools := []toolEntry{{
+		Name: "evil|name", Version: "v1|2", Runtime: "bash", Invoke: "evil|invoke", Trigger: "fine",
+	}}
+	got := renderAgentBlock(tools)
+
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	var row string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "| evil") {
+			row = l
+			break
+		}
+	}
+	if row == "" {
+		t.Fatalf("row for tool %q not found:\n%s", tools[0].Name, got)
+	}
+	// A well-formed 4-column row "| a | b | c | d |" has exactly 5 unescaped
+	// pipes (the boundaries). Escaped pipes ("\|") must not count toward that.
+	unescaped := strings.Count(strings.ReplaceAll(row, `\|`, ""), "|")
+	if unescaped != 5 {
+		t.Errorf("row has %d unescaped pipes, want 5 (4 columns): %q", unescaped, row)
+	}
+	if !strings.Contains(row, `evil\|name`) {
+		t.Errorf("Name pipe not escaped: %q", row)
+	}
+	if !strings.Contains(row, `v1\|2`) {
+		t.Errorf("Version pipe not escaped: %q", row)
+	}
+	if !strings.Contains(row, `evil\|invoke`) {
+		t.Errorf("Invoke pipe not escaped: %q", row)
+	}
+}
+
+// TestRenderAgentBlockExternalMarkerSurvivesEscaping is a regression guard:
+// escaping Name/Version/Invoke must not disturb the external/--json trust
+// signal that distinguishes unreviewed --mise CLIs from vendored tools.
+func TestRenderAgentBlockExternalMarkerSurvivesEscaping(t *testing.T) {
+	tools := []toolEntry{
+		{Name: "calc", Version: "v0.1.1", Runtime: "python", Invoke: "calc --json …", Trigger: "Evaluate an expression."},
+		{Name: "pup", Version: "v0.9.0", Runtime: "mise", External: true, Invoke: "pup",
+			Trigger: "external CLI via mise (ubi:DataDog/pup) — no source reviewed"},
+	}
+	got := renderAgentBlock(tools)
+
+	if !strings.Contains(got, "`calc --json …`") {
+		t.Errorf("vendored tool lost its --json invoke: %s", got)
+	}
+	if !strings.Contains(got, "`pup` (external, unreviewed)") {
+		t.Errorf("external tool lost its external marker: %s", got)
+	}
+	if strings.Contains(got, "pup --json") {
+		t.Errorf("external tool advertised with --json: %s", got)
+	}
+}
+
 func TestRenderAgentBlockEmpty(t *testing.T) {
 	got := renderAgentBlock(nil)
 	if !strings.Contains(got, agentBlockEnd) {
