@@ -406,7 +406,15 @@ func TestAgentsBlockCheckMissingFileIsInfoAndFixCreatesAgentsMD(t *testing.T) {
 	}
 }
 
-// Nothing adopted: an empty table is noise, so stay silent.
+// Nothing adopted: an empty table is noise, so stay silent. Regression guard
+// for the re-review finding: this must hold even when a plain, blockless
+// AGENTS.md/CLAUDE.md already exists (e.g. hand-authored, predating smith
+// entirely) — `smith install` refuses to run at all with zero tools
+// ("no adopted tools ... to adopt one"), so it could never have written a
+// block into either file, and doctor must not report or "fix" a state
+// install can't produce. Gating on file PRESENCE instead of block presence
+// was exactly the bug: it made doctor warn "block is missing or out of date"
+// and --fix inject a block into files that never had one.
 func TestAgentsBlockCheckSilentWithNoTools(t *testing.T) {
 	p := testPaths(t)
 	t.Chdir(t.TempDir())
@@ -416,10 +424,34 @@ func TestAgentsBlockCheckSilentWithNoTools(t *testing.T) {
 	if err := saveProjLock(ProjLock{Tools: map[string]ProjTool{}}); err != nil {
 		t.Fatal(err)
 	}
+	agentsMD := "# Project\n\nHand-written notes; no smith block here.\n"
+	claudeMD := "# Project (Claude)\n\nAlso hand-written; no smith block here either.\n"
+	if err := os.WriteFile("AGENTS.md", []byte(agentsMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("CLAUDE.md", []byte(claudeMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	dc := docCtx{p: p, projectDir: ".", lock: ProjLock{Tools: map[string]ProjTool{}}}
 
 	if f, ok := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block"); ok {
-		t.Errorf("no tools adopted — check should not report, got %q", f.Message)
+		t.Errorf("no tools adopted and no file has ever had a smith block — check should not report, got %q", f.Message)
+	}
+
+	runDoctor(dc, doctorChecks(), true)
+	gotAgents, err := os.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotAgents) != agentsMD {
+		t.Errorf("--fix must not touch a blockless AGENTS.md when zero tools are adopted:\ngot:  %q\nwant: %q", gotAgents, agentsMD)
+	}
+	gotClaude, err := os.ReadFile("CLAUDE.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotClaude) != claudeMD {
+		t.Errorf("--fix must not touch a blockless CLAUDE.md when zero tools are adopted:\ngot:  %q\nwant: %q", gotClaude, claudeMD)
 	}
 }
 
@@ -466,6 +498,16 @@ func TestAgentsBlockCheckStaleBlockAfterLastToolRemoved(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "No tools adopted yet") {
 		t.Errorf("--fix should replace the stale block with the empty-state message:\n%s", got)
+	}
+
+	// Re-diagnosing after the fix must converge to ok, not report the same
+	// (or a different) finding forever.
+	f2, ok := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block")
+	if !ok {
+		t.Fatal("agents-block check should still report after --fix (state is now ok, not silent — a block IS present)")
+	}
+	if f2.Severity != sevOK {
+		t.Errorf("after --fix, re-diagnose should report ok, got %q (%s)", f2.Severity, f2.Message)
 	}
 }
 

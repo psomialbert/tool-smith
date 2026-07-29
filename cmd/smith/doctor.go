@@ -257,30 +257,38 @@ var agentMdTargetNames = map[string]string{
 // target selected), create is "" and the check has nothing to do.
 //
 // Presence is determined with Lstat, matching mdTarget.detect in agents.go —
-// a dangling symlink or a directory counts as present, so it is never treated
-// as absent. A non-ENOENT stat/read failure (e.g. a mode-0000 file, or a
-// dangling symlink whose target can't be read) is returned as err rather than
-// silently folded into "absent": treating an unreadable existing file as
-// absent would send apply down the create path, where writeFileAtomic's
-// rename clobbers the user's real content — or, for a dangling symlink,
-// replaces the link itself, exactly what upsertManagedBlock's own symlink
-// guard exists to refuse.
+// a dangling symlink counts as present, so it is never treated as absent, but
+// a directory does not (see the IsDir check below). A non-ENOENT stat/read
+// failure (e.g. a mode-0000 file, or a dangling symlink whose target can't be
+// read) is returned as err rather than silently folded into "absent":
+// treating an unreadable existing file as absent would send apply down the
+// create path, where writeFileAtomic's rename clobbers the user's real
+// content — or, for a dangling symlink, replaces the link itself, exactly
+// what upsertManagedBlock's own symlink guard exists to refuse.
 //
 // stale lists EVERY existing, readable file whose block is missing or out of
 // date — not just the first. emitAgentTargets writes all detected files, so
 // returning early on the first healthy one would let a stale CLAUDE.md sit
-// unreported beside a current AGENTS.md. present is true when at least one
-// selected file exists (by Lstat) AND is not a directory (matching
-// mdTarget.detect in agents.go, so install and doctor agree on what counts as
-// an agent instruction file). ambiguous lists files with more than one
-// "smith:begin" marker — upsertManagedBlock itself refuses to touch those
-// (no way to tell which block is authoritative), so they are reported
-// separately rather than folded into stale, which implies a safe rewrite.
-// When it is false, create is the path of the first selected file to create.
-func agentBlockState(dc docCtx) (stale []string, present bool, create string, ambiguous []string, err error) {
+// unreported beside a current AGENTS.md. When there are zero adopted tools, a
+// file that has never had a smith block is deliberately excluded from stale:
+// `smith install` refuses to run at all with zero tools, so doctor must never
+// offer to inject a first block into a file install would never have
+// touched — only a file that ALREADY carries a block (now stale because it
+// lists tools that are gone) is reported in that case. anyBlock reports
+// whether any selected file contains at least one "smith:begin" marker at
+// all — the caller uses it to decide whether the "zero tools" case should be
+// silent or reported. present is true when at least one selected file exists
+// (by Lstat) AND is not a directory (matching mdTarget.detect in agents.go,
+// so install and doctor agree on what counts as an agent instruction file).
+// ambiguous lists files with more than one "smith:begin" marker —
+// upsertManagedBlock itself refuses to touch those (no way to tell which
+// block is authoritative), so they are reported separately rather than
+// folded into stale, which implies a safe rewrite. When present is false,
+// create is the path of the first selected file to create.
+func agentBlockState(dc docCtx) (stale []string, present bool, create string, ambiguous []string, anyBlock bool, err error) {
 	fc, ferr := dc.p.LoadFileConfig()
 	if ferr != nil {
-		return nil, false, "", nil, fmt.Errorf("loading config: %w", ferr)
+		return nil, false, "", nil, false, fmt.Errorf("loading config: %w", ferr)
 	}
 	selected := map[string]bool{}
 	for _, n := range resolveTargets(fc) {
@@ -293,9 +301,10 @@ func agentBlockState(dc docCtx) (stale []string, present bool, create string, am
 		}
 	}
 	if len(files) == 0 {
-		return nil, false, "", nil, nil // no md target configured — nothing to check
+		return nil, false, "", nil, false, nil // no md target configured — nothing to check
 	}
 
+	noTools := len(dc.lock.Tools) == 0
 	want := strings.TrimRight(renderAgentBlock(projectToolIndex(dc.lock)), "\n")
 	for _, name := range files {
 		p := filepath.Join(dc.projectDir, name)
@@ -304,7 +313,7 @@ func agentBlockState(dc docCtx) (stale []string, present bool, create string, am
 			if os.IsNotExist(statErr) {
 				continue
 			}
-			return nil, false, "", nil, fmt.Errorf("checking %s: %w", p, statErr)
+			return nil, false, "", nil, false, fmt.Errorf("checking %s: %w", p, statErr)
 		}
 		if fi.IsDir() {
 			// A directory is not an agent instruction file — mdTarget.detect
@@ -317,9 +326,13 @@ func agentBlockState(dc docCtx) (stale []string, present bool, create string, am
 		present = true
 		raw, readErr := os.ReadFile(p)
 		if readErr != nil {
-			return nil, false, "", nil, fmt.Errorf("reading %s: %w", p, readErr)
+			return nil, false, "", nil, false, fmt.Errorf("reading %s: %w", p, readErr)
 		}
 		text := string(raw)
+		hasBlock := strings.Contains(text, agentBlockBeginPrefix)
+		if hasBlock {
+			anyBlock = true
+		}
 		if n := strings.Count(text, agentBlockBeginPrefix); n > 1 {
 			// Mirrors upsertManagedBlock's own refusal message: there is no
 			// way to tell which block is authoritative, so this can never be
@@ -328,11 +341,19 @@ func agentBlockState(dc docCtx) (stale []string, present bool, create string, am
 			ambiguous = append(ambiguous, fmt.Sprintf("%s has %d smith blocks; remove the extras so there is one to update", p, n))
 			continue
 		}
-		if !strings.Contains(text, want) {
+		if strings.Contains(text, want) {
+			continue
+		}
+		// Mismatch. With tools adopted, a blockless present file is legitimately
+		// stale (install would put a block there) — unchanged from before. With
+		// zero tools, only report it if it already has SOME block: a blockless
+		// file must never be treated as needing one injected, since `smith
+		// install` itself refuses to run at all with zero tools.
+		if !noTools || hasBlock {
 			stale = append(stale, p)
 		}
 	}
-	return stale, present, filepath.Join(dc.projectDir, files[0]), ambiguous, nil
+	return stale, present, filepath.Join(dc.projectDir, files[0]), ambiguous, anyBlock, nil
 }
 
 // mustAbs resolves dir to an absolute path, falling back to dir on error — used
@@ -474,7 +495,7 @@ func doctorChecks() []check {
 		{
 			name: "agents-block", scope: scopeProject,
 			diagnose: func(dc docCtx) []finding {
-				stale, present, create, ambiguous, err := agentBlockState(dc)
+				stale, present, create, ambiguous, anyBlock, err := agentBlockState(dc)
 				if err != nil {
 					// A file exists but couldn't be stat'd/read (permissions, a
 					// dangling symlink target, ...). Report it plainly rather than
@@ -490,12 +511,18 @@ func doctorChecks() []check {
 					// (or configured only non-md targets); nothing to check.
 					return nil
 				}
-				if len(dc.lock.Tools) == 0 && !present {
-					// Nothing adopted and no agent instruction file at all: an empty
-					// table would be noise, not help. This is distinct from the case
-					// below (nothing adopted but a stale block IS present — e.g. the
-					// last tool was just un-adopted): that one still needs reporting
-					// so --fix can clean it up instead of leaving it to rot silently.
+				if len(dc.lock.Tools) == 0 && !anyBlock {
+					// Nothing adopted and no selected file has ever carried a smith
+					// block: an empty table would be noise, not help. Gating on
+					// anyBlock (not present) matters — a project can have a plain,
+					// blockless AGENTS.md that predates smith entirely, and `smith
+					// install` refuses to run at all with zero tools, so it would
+					// never have written a block into it either; doctor must not
+					// report or "fix" a state install can't produce. This is
+					// distinct from the case below (nothing adopted but a block IS
+					// present — e.g. the last tool was just un-adopted): that one
+					// still needs reporting so --fix can clean it up instead of
+					// leaving it to rot silently.
 					return nil
 				}
 				f := finding{Check: "agents-block", Scope: scopeProject}
@@ -525,7 +552,7 @@ func doctorChecks() []check {
 				return []finding{f}
 			},
 			apply: func(dc docCtx) error {
-				stale, present, create, _, err := agentBlockState(dc)
+				stale, present, create, _, _, err := agentBlockState(dc)
 				if err != nil {
 					return err
 				}
