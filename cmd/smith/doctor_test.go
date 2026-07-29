@@ -473,3 +473,178 @@ func TestAgentsBlockCheckDetectsStaleSecondFile(t *testing.T) {
 		t.Errorf("--fix did not refresh CLAUDE.md:\n%s", got)
 	}
 }
+
+// --- Fix round 1: an unreadable-but-present file must never read as absent,
+// and the check must honor agents.targets instead of assuming every *-md
+// file is always in scope. ---
+
+// An existing but unreadable AGENTS.md (e.g. mode 0000) must not be treated
+// as "no AGENTS.md" — that misreading sent --fix down the create path, where
+// writeFileAtomic's rename clobbered the user's real content.
+func TestAgentsBlockCheckUnreadableFileIsNotTreatedAsAbsent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions; this test needs a real permission denial")
+	}
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(smithDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := ProjLock{Tools: map[string]ProjTool{
+		"calc": {Version: "v1", Runtime: "bash", Entrypoint: "calc"},
+	}}
+	if err := saveProjLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	userContent := "# My real project\n\nHand-written notes; do not touch.\n"
+	if err := os.WriteFile("AGENTS.md", []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod("AGENTS.md", 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod("AGENTS.md", 0o644) }) // let TempDir cleanup remove it
+	dc := docCtx{p: p, projectDir: ".", lock: lock}
+
+	f, ok := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block")
+	if !ok {
+		t.Fatal("agents-block check did not report")
+	}
+	if f.Severity == sevINFO || strings.Contains(f.Message, "no AGENTS.md") {
+		t.Errorf("an unreadable existing file must not be reported as absent, got %q (%s)", f.Severity, f.Message)
+	}
+	if f.Fixable {
+		t.Errorf("an unreadable file's state can't be safely fixed, got Fixable=true (%s)", f.Message)
+	}
+
+	runDoctor(dc, doctorChecks(), true)
+	if err := os.Chmod("AGENTS.md", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != userContent {
+		t.Errorf("--fix must not touch an unreadable file's content:\ngot:  %q\nwant: %q", got, userContent)
+	}
+}
+
+// A dangling symlink at AGENTS.md counts as present (matching mdTarget.detect,
+// which uses Lstat) and must never be replaced by --fix with a regular file —
+// exactly the case upsertManagedBlock's own symlink guard exists to refuse.
+func TestAgentsBlockCheckDanglingSymlinkNotReplaced(t *testing.T) {
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(smithDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := ProjLock{Tools: map[string]ProjTool{
+		"calc": {Version: "v1", Runtime: "bash", Entrypoint: "calc"},
+	}}
+	if err := saveProjLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("does-not-exist-target.md", "AGENTS.md"); err != nil {
+		t.Fatal(err)
+	}
+	dc := docCtx{p: p, projectDir: ".", lock: lock}
+
+	f, ok := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block")
+	if !ok {
+		t.Fatal("agents-block check did not report")
+	}
+	if f.Severity == sevINFO {
+		t.Errorf("a dangling symlink must not be reported as absent, got %q (%s)", f.Severity, f.Message)
+	}
+
+	runDoctor(dc, doctorChecks(), true)
+	fi, err := os.Lstat("AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("--fix replaced the dangling symlink with a regular file")
+	}
+}
+
+// agents.targets: ["agents-md"] means doctor must never warn about, or write,
+// a stale CLAUDE.md — smith install was never configured to touch it either.
+func TestAgentsBlockCheckHonorsConfiguredTargets(t *testing.T) {
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(smithDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.Home, "config.yaml"), []byte("agents:\n  targets: [\"agents-md\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lock := ProjLock{Tools: map[string]ProjTool{
+		"calc": {Version: "v1", Runtime: "bash", Entrypoint: "calc"},
+	}}
+	if err := saveProjLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	block := renderAgentBlock(projectToolIndex(lock))
+	if err := os.WriteFile("AGENTS.md", []byte("# P\n\n"+block), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staleBlock := agentBlockBeginPrefix + " -->\nSTALE\n" + agentBlockEnd + "\n"
+	staleContent := "# P\n\n" + staleBlock
+	if err := os.WriteFile("CLAUDE.md", []byte(staleContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dc := docCtx{p: p, projectDir: ".", lock: lock}
+
+	f, ok := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block")
+	if !ok {
+		t.Fatal("agents-block check did not report")
+	}
+	if f.Severity != sevOK {
+		t.Errorf("current AGENTS.md with claude-md un-configured must be ok, got %q (%s)", f.Severity, f.Message)
+	}
+	if strings.Contains(f.Message, "CLAUDE.md") {
+		t.Errorf("message must not mention the un-configured CLAUDE.md: %s", f.Message)
+	}
+
+	runDoctor(dc, doctorChecks(), true)
+	got, err := os.ReadFile("CLAUDE.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != staleContent {
+		t.Error("--fix must not write CLAUDE.md when agents.targets excludes claude-md")
+	}
+}
+
+// agents.targets: [] is an explicit opt-out (distinct from the key being
+// absent) — the check must stay silent and --fix must create nothing.
+func TestAgentsBlockCheckSilentWhenTargetsEmpty(t *testing.T) {
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(smithDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.Home, "config.yaml"), []byte("agents:\n  targets: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lock := ProjLock{Tools: map[string]ProjTool{
+		"calc": {Version: "v1", Runtime: "bash", Entrypoint: "calc"},
+	}}
+	if err := saveProjLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	dc := docCtx{p: p, projectDir: ".", lock: lock}
+
+	if f, ok := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block"); ok {
+		t.Errorf("agents.targets: [] opts out entirely — check should not report, got %q", f.Message)
+	}
+
+	runDoctor(dc, doctorChecks(), true)
+	if _, err := os.Stat("AGENTS.md"); !os.IsNotExist(err) {
+		t.Error("--fix must not create AGENTS.md when agents.targets is explicitly empty")
+	}
+	if _, err := os.Stat("CLAUDE.md"); !os.IsNotExist(err) {
+		t.Error("--fix must not create CLAUDE.md when agents.targets is explicitly empty")
+	}
+}

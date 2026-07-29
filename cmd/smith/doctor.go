@@ -237,29 +237,79 @@ func skillDescription(skillPath string) string {
 // *-md targets in agentTargets().
 var agentInstructionFiles = []string{"AGENTS.md", "CLAUDE.md"}
 
+// agentMdTargetNames maps each file in agentInstructionFiles to the
+// agents.targets name that governs it, so the check can honor the same
+// config `smith install` reads (via resolveTargets) instead of assuming
+// every file is always in scope.
+var agentMdTargetNames = map[string]string{
+	"AGENTS.md": "agents-md",
+	"CLAUDE.md": "claude-md",
+}
+
 // agentBlockState reports the agent-instruction-file state for the project.
 // Shared by the agents-block check's diagnose and apply halves so detection
 // lives in one place.
 //
-// stale lists EVERY existing file whose block is missing or out of date — not
-// just the first. emitAgentTargets writes all detected files, so returning
-// early on the first healthy one would let a stale CLAUDE.md sit unreported
-// beside a current AGENTS.md. present is true when at least one of the files
-// exists; when it is false, create is the AGENTS.md path to create.
-func agentBlockState(dc docCtx) (stale []string, present bool, create string) {
-	want := strings.TrimRight(renderAgentBlock(projectToolIndex(dc.lock)), "\n")
+// Only files whose corresponding md target is selected by agents.targets
+// (resolved the same way `smith install` resolves it, via resolveTargets) are
+// considered at all — a stale CLAUDE.md that install was never configured to
+// touch must not be reported or "fixed" by doctor. When files is empty (no md
+// target selected), create is "" and the check has nothing to do.
+//
+// Presence is determined with Lstat, matching mdTarget.detect in agents.go —
+// a dangling symlink or a directory counts as present, so it is never treated
+// as absent. A non-ENOENT stat/read failure (e.g. a mode-0000 file, or a
+// dangling symlink whose target can't be read) is returned as err rather than
+// silently folded into "absent": treating an unreadable existing file as
+// absent would send apply down the create path, where writeFileAtomic's
+// rename clobbers the user's real content — or, for a dangling symlink,
+// replaces the link itself, exactly what upsertManagedBlock's own symlink
+// guard exists to refuse.
+//
+// stale lists EVERY existing, readable file whose block is missing or out of
+// date — not just the first. emitAgentTargets writes all detected files, so
+// returning early on the first healthy one would let a stale CLAUDE.md sit
+// unreported beside a current AGENTS.md. present is true when at least one
+// selected file exists (by Lstat); when it is false, create is the path of
+// the first selected file to create.
+func agentBlockState(dc docCtx) (stale []string, present bool, create string, err error) {
+	fc, ferr := dc.p.LoadFileConfig()
+	if ferr != nil {
+		return nil, false, "", fmt.Errorf("loading config: %w", ferr)
+	}
+	selected := map[string]bool{}
+	for _, n := range resolveTargets(fc) {
+		selected[n] = true
+	}
+	var files []string
 	for _, name := range agentInstructionFiles {
+		if selected[agentMdTargetNames[name]] {
+			files = append(files, name)
+		}
+	}
+	if len(files) == 0 {
+		return nil, false, "", nil // no md target configured — nothing to check
+	}
+
+	want := strings.TrimRight(renderAgentBlock(projectToolIndex(dc.lock)), "\n")
+	for _, name := range files {
 		p := filepath.Join(dc.projectDir, name)
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			continue
+		if _, statErr := os.Lstat(p); statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return nil, false, "", fmt.Errorf("checking %s: %w", p, statErr)
 		}
 		present = true
+		raw, readErr := os.ReadFile(p)
+		if readErr != nil {
+			return nil, false, "", fmt.Errorf("reading %s: %w", p, readErr)
+		}
 		if !strings.Contains(string(raw), want) {
 			stale = append(stale, p)
 		}
 	}
-	return stale, present, filepath.Join(dc.projectDir, agentInstructionFiles[0])
+	return stale, present, filepath.Join(dc.projectDir, files[0]), nil
 }
 
 // mustAbs resolves dir to an absolute path, falling back to dir on error — used
@@ -405,7 +455,22 @@ func doctorChecks() []check {
 				if len(dc.lock.Tools) == 0 {
 					return nil
 				}
-				stale, present, create := agentBlockState(dc)
+				stale, present, create, err := agentBlockState(dc)
+				if err != nil {
+					// A file exists but couldn't be stat'd/read (permissions, a
+					// dangling symlink target, ...). Report it plainly rather than
+					// risk misreading it as "absent" and letting --fix clobber it;
+					// not fixable, so --fix leaves it untouched.
+					return []finding{{
+						Check: "agents-block", Scope: scopeProject, Severity: sevERROR,
+						Message: "cannot determine agent instruction file state: " + err.Error(),
+					}}
+				}
+				if create == "" {
+					// No agents.targets md target selected — this project opted out
+					// (or configured only non-md targets); nothing to check.
+					return nil
+				}
 				f := finding{Check: "agents-block", Scope: scopeProject}
 				switch {
 				case !present:
@@ -425,11 +490,18 @@ func doctorChecks() []check {
 				return []finding{f}
 			},
 			apply: func(dc docCtx) error {
-				stale, present, create := agentBlockState(dc)
+				stale, present, create, err := agentBlockState(dc)
+				if err != nil {
+					return err
+				}
+				if create == "" {
+					return nil // nothing selected to fix
+				}
 				block := renderAgentBlock(projectToolIndex(dc.lock))
 				if !present {
-					// Create AGENTS.md — the cross-agent convention. Never
-					// CLAUDE.md, which would presume a specific agent.
+					// Create the first selected target file (AGENTS.md by default —
+					// the cross-agent convention — never CLAUDE.md unless a project
+					// explicitly configured agents.targets to exclude agents-md).
 					if err := writeFileAtomic(create, []byte("# "+filepath.Base(mustAbs(dc.projectDir))+"\n"), 0o644); err != nil {
 						return err
 					}
