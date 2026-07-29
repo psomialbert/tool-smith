@@ -111,10 +111,11 @@ run `lens` first: it refreshes a smith-managed block (tool name, version,
 invoke form, trigger) inside **whichever of `AGENTS.md` / `CLAUDE.md` already
 exists** in the project root — content outside the block is left alone.
 smith never creates either file; if neither exists, an agent has nothing to
-read until one does (`smith doctor --fix` will create `AGENTS.md` for you, or
-just add one by hand). Re-running `smith install` is idempotent — an
-up-to-date block produces no diff, so it's safe to run in CI without dirtying
-a git-tracked file.
+read until one does — `smith doctor --fix` creates the first `*-md` target
+that's selected (`AGENTS.md` by default; `CLAUDE.md` only if `agents.targets`
+excludes `agents-md`; nothing if it excludes both) — or just add one by hand.
+Re-running `smith install` is idempotent — an up-to-date block produces no
+diff, so it's safe to run in CI without dirtying a git-tracked file.
 
 Which targets `smith install` writes to is configurable in
 `$SMITH_HOME/config.yaml`:
@@ -128,7 +129,9 @@ Leaving `agents.targets` unset auto-detects: `smith install` emits to
 whichever of the three targets apply (`claude` — the machine-global per-tool
 skill export — plus `agents-md`/`claude-md` for whichever files already
 exist). Setting `targets` to an explicit list — including `[]` — overrides
-auto-detection entirely; an unknown name is a hard config error.
+auto-detection entirely; an unknown name is a hard config error, while a
+target that merely fails to write only warns — `smith install` still
+succeeds for the rest.
 
 `smith use` runs the tool's self-test sandboxed and writes a reviewable diff;
 it never grants trust on its own — the tool becomes PATH-available only once
