@@ -116,12 +116,22 @@ func truncateValidUTF8(s string, n int) string {
 	return s
 }
 
-// escapeTableCell escapes the one character that would let a table cell's
-// content forge extra column boundaries: `|`. Unlike sanitizeTrigger, it does
-// not strip comments, collapse whitespace, or cap length — Name, Version, and
-// Invoke aren't free-text descriptions, they just need to stay structurally
-// safe as a single cell in a rendered markdown table.
+// escapeTableCell makes a value safe to embed as a table cell in the
+// rendered block. Unlike sanitizeTrigger, it does not collapse whitespace or
+// cap length — Name, Version, and Invoke aren't free-text descriptions — but
+// it must still close the same two holes sanitizeTrigger closes for Trigger:
+//
+//   - HTML comment syntax is stripped (reusing stripHTMLComments' fixpoint
+//     loop) so a hostile Name/Version/Invoke — e.g. a git tag like
+//     "v1.0<!-- smith:end -->", reachable because Version is unvalidated on
+//     the adopt path — cannot forge the managed-block end marker.
+//     upsertManagedBlock locates the FIRST end marker after the begin marker
+//     and treats everything past it as untouched tail; a forged marker here
+//     would truncate the managed block early and let attacker-controlled
+//     content become a permanent fixture outside it, immune to regeneration.
+//   - `|` is escaped so it cannot forge table columns.
 func escapeTableCell(s string) string {
+	s = stripHTMLComments(s)
 	return strings.ReplaceAll(s, "|", `\|`)
 }
 
