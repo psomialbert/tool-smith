@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"smith/internal/config"
 )
 
 // toolEntry is one adopted tool as presented to an agent. Shared by `smith
@@ -233,4 +235,109 @@ func upsertManagedBlock(path, block string) error {
 		return nil // already current — don't touch the file at all
 	}
 	return writeFileAtomic(path, []byte(out), 0o644)
+}
+
+// resolveTargets returns the target names to emit to. Precedence is explicit so
+// the two knobs cannot contradict each other:
+//
+//  1. agents.targets set (even to an empty list) wins entirely.
+//  2. Otherwise every target is eligible (each still self-detects), minus the
+//     machine-scoped claude export when the legacy `skills.export: never` is set.
+func resolveTargets(fc config.FileConfig) []string {
+	if fc.Agents.Targets != nil {
+		return fc.Agents.Targets
+	}
+	var out []string
+	for _, t := range agentTargets() {
+		if t.name == "claude" && fc.Skills.Export == "never" {
+			continue
+		}
+		out = append(out, t.name)
+	}
+	return out
+}
+
+// emitCtx is what an emitter needs: resolved paths (for SkillsDir), the loaded
+// file config, and the project root (the dir holding .smith/).
+type emitCtx struct {
+	p          config.Paths
+	fc         config.FileConfig
+	projectDir string
+}
+
+// agentTarget renders the project's adopted-tool index into one agent's native
+// discovery format. emit MUST be idempotent: emitting twice over the same index
+// leaves the file byte-identical.
+//
+// scope is recorded because the targets genuinely differ. The claude target is
+// machine-scoped (it writes a global skills dir, so project A's tools stay
+// visible in project B — see the spec's Known limits); the *-md targets are
+// project-scoped. Leaving that implicit is how a future target inherits the bug.
+type agentTarget struct {
+	name   string
+	scope  string
+	detect func(emitCtx) bool
+	emit   func(emitCtx, []toolEntry) error
+}
+
+// mdTarget builds a project-scoped target that upserts the managed block into
+// filename, detecting on the file already existing.
+func mdTarget(name, filename string) agentTarget {
+	return agentTarget{
+		name:  name,
+		scope: scopeProject,
+		detect: func(ec emitCtx) bool {
+			fi, err := os.Lstat(filepath.Join(ec.projectDir, filename))
+			return err == nil && !fi.IsDir()
+		},
+		emit: func(ec emitCtx, tools []toolEntry) error {
+			return upsertManagedBlock(filepath.Join(ec.projectDir, filename), renderAgentBlock(tools))
+		},
+	}
+}
+
+// agentTargets is the full registry, in emission order.
+func agentTargets() []agentTarget {
+	return []agentTarget{
+		{
+			name:   "claude",
+			scope:  scopeMachine,
+			detect: func(emitCtx) bool { return true },
+			emit: func(ec emitCtx, tools []toolEntry) error {
+				// Unchanged from the pre-registry behavior: copy each vendored
+				// SKILL.md into the machine-global skills dir. External mise tools
+				// have no vendored SKILL.md, so Stat skips them.
+				for _, t := range tools {
+					src := filepath.Join(smithDir, "tools", t.Name, "SKILL.md")
+					if _, err := os.Stat(src); err != nil {
+						continue
+					}
+					if err := copyPlain(src, filepath.Join(ec.fc.SkillsDir(), t.Name, "SKILL.md")); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
+		mdTarget("agents-md", "AGENTS.md"),
+		mdTarget("claude-md", "CLAUDE.md"),
+	}
+}
+
+// emitAgentTargets emits the index to every selected, detected target. Failures
+// warn and never propagate: a read-only AGENTS.md must not break `smith install`
+// (matching how the skill export has always behaved).
+func emitAgentTargets(ec emitCtx, tools []toolEntry) {
+	selected := map[string]bool{}
+	for _, n := range resolveTargets(ec.fc) {
+		selected[n] = true
+	}
+	for _, t := range agentTargets() {
+		if !selected[t.name] || !t.detect(ec) {
+			continue
+		}
+		if err := t.emit(ec, tools); err != nil {
+			fmt.Fprintf(os.Stderr, "[smith] agent target %q: %v\n", t.name, err)
+		}
+	}
 }

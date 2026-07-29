@@ -1055,35 +1055,21 @@ func cmdInstall(p config.Paths, args []string) error {
 		fmt.Fprintln(os.Stderr, "[smith] note: `mise trust` failed; run it in this dir")
 	}
 
-	// Adopted tools are trusted for this project, so export their SKILL.md so
-	// agent sessions discover them (config skills.export: always|never). Fail
-	// closed on a corrupt config: a zero-value config would silently default to
-	// exporting, defeating an operator's `export: never`.
+	// Adopted tools are trusted for this project, so advertise them to whatever
+	// agent targets are enabled (config agents.targets / legacy skills.export).
+	// Fail closed on a corrupt config: a zero-value config would silently
+	// default to exporting, defeating an operator's `export: never`.
 	fc, ferr := p.LoadFileConfig()
 	if ferr != nil {
 		return fmt.Errorf("reading %s (fix or remove it): %w", filepath.Join(p.Home, "config.yaml"), ferr)
 	}
-	// Validate the export setting so a typo can't silently defeat intent: a
-	// value like "Never" or "nevr" previously fell through to exporting (the
-	// opposite of what an operator who wrote `export: never` wanted). Reject any
-	// value that isn't a recognized keyword; empty means the default (always).
+	// Validate the legacy export setting so a typo can't silently defeat intent.
 	switch fc.Skills.Export {
 	case "", "always", "never":
 	default:
 		return fmt.Errorf("unknown skills.export %q in %s (want: always | never)", fc.Skills.Export, filepath.Join(p.Home, "config.yaml"))
 	}
-	if fc.Skills.Export != "never" {
-		for _, name := range names {
-			src := filepath.Join(smithDir, "tools", name, "SKILL.md")
-			if _, err := os.Stat(src); err != nil {
-				continue
-			}
-			dst := filepath.Join(fc.SkillsDir(), name, "SKILL.md")
-			if err := copyPlain(src, dst); err != nil {
-				fmt.Fprintf(os.Stderr, "[smith] skill export failed for %s: %v\n", name, err)
-			}
-		}
-	}
+	emitAgentTargets(emitCtx{p: p, fc: fc, projectDir: "."}, projectToolIndex(lock))
 
 	if len(vendored) > 0 {
 		fmt.Printf("installed %d tool(s) on PATH for this project (via %s)\n", len(vendored), binDir)

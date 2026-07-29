@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"smith/internal/config"
 )
 
 // writeToolSkill creates .smith/tools/<name>/SKILL.md with the given description
@@ -539,5 +541,116 @@ func TestRenderAgentBlockEmpty(t *testing.T) {
 	}
 	if strings.Contains(got, "| tool |") {
 		t.Errorf("no tools adopted — omit the table header:\n%s", got)
+	}
+}
+
+func TestResolveTargetsDefaults(t *testing.T) {
+	got := resolveTargets(config.FileConfig{})
+	want := map[string]bool{"claude": true, "agents-md": true, "claude-md": true}
+	if len(got) != len(want) {
+		t.Fatalf("default targets = %v; want all %d", got, len(want))
+	}
+	for _, n := range got {
+		if !want[n] {
+			t.Errorf("unexpected default target %q", n)
+		}
+	}
+}
+
+// Legacy knob: `skills.export: never` predates agents.targets and must keep
+// disabling the Claude skills export — and only that target.
+func TestResolveTargetsHonorsLegacySkillsExportNever(t *testing.T) {
+	got := resolveTargets(config.FileConfig{Skills: config.SkillsConfig{Export: "never"}})
+	for _, n := range got {
+		if n == "claude" {
+			t.Error("skills.export: never must drop the claude target")
+		}
+	}
+	if len(got) == 0 {
+		t.Error("the project-scoped targets should survive skills.export: never")
+	}
+}
+
+// An explicit agents.targets wins entirely, so the two knobs cannot contradict.
+func TestResolveTargetsExplicitWins(t *testing.T) {
+	fc := config.FileConfig{
+		Skills: config.SkillsConfig{Export: "never"},
+		Agents: config.AgentsConfig{Targets: []string{"claude"}},
+	}
+	got := resolveTargets(fc)
+	if len(got) != 1 || got[0] != "claude" {
+		t.Fatalf("explicit targets = %v; want exactly [claude]", got)
+	}
+}
+
+// `targets: []` (present but empty) means emit nothing — the CI escape hatch.
+// This must be distinguishable from an absent key, which means auto-detect.
+func TestResolveTargetsEmptyListEmitsNothing(t *testing.T) {
+	fc := config.FileConfig{Agents: config.AgentsConfig{Targets: []string{}}}
+	if got := resolveTargets(fc); len(got) != 0 {
+		t.Fatalf("empty targets list = %v; want none", got)
+	}
+}
+
+func TestEmitAgentTargetsUpdatesExistingAgentsMD(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("AGENTS.md", []byte("# Proj\n\nmine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tools := []toolEntry{{Name: "calc", Version: "v0.1.1", Runtime: "python", Invoke: "calc --json …", Trigger: "Evaluate."}}
+
+	ec := emitCtx{fc: config.FileConfig{Agents: config.AgentsConfig{Targets: []string{"agents-md"}}}, projectDir: "."}
+	emitAgentTargets(ec, tools)
+
+	got, err := os.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "calc") {
+		t.Errorf("AGENTS.md not updated:\n%s", got)
+	}
+	if !strings.HasPrefix(string(got), "# Proj\n\nmine\n") {
+		t.Errorf("existing content disturbed:\n%s", got)
+	}
+}
+
+// smith must never create an agent instruction file during install.
+func TestEmitAgentTargetsNeverCreatesFiles(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ec := emitCtx{fc: config.FileConfig{Agents: config.AgentsConfig{Targets: []string{"agents-md", "claude-md"}}}, projectDir: "."}
+
+	emitAgentTargets(ec, []toolEntry{{Name: "calc", Version: "v1", Invoke: "calc --json …", Trigger: "x"}})
+
+	for _, f := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Errorf("%s was created; install must only update files that already exist", f)
+		}
+	}
+}
+
+// Emitting twice must leave the file byte-identical, or every install churns it.
+func TestEmitAgentTargetsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("AGENTS.md", []byte("# P\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tools := []toolEntry{{Name: "calc", Version: "v1", Invoke: "calc --json …", Trigger: "x"}}
+	ec := emitCtx{fc: config.FileConfig{Agents: config.AgentsConfig{Targets: []string{"agents-md"}}}, projectDir: "."}
+
+	emitAgentTargets(ec, tools)
+	first, err := os.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitAgentTargets(ec, tools)
+	second, err := os.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("emission is not idempotent:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
 }
