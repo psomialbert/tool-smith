@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -66,5 +67,37 @@ func TestProjectToolIndexMissingSkill(t *testing.T) {
 	got := projectToolIndex(lock)
 	if len(got) != 1 || got[0].Trigger != "(no trigger described)" {
 		t.Fatalf("missing SKILL.md should yield the placeholder trigger, got %+v", got)
+	}
+}
+
+func TestSanitizeTrigger(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"passthrough", "Evaluate an expression.", "Evaluate an expression."},
+		{"newlines collapse", "line one\nline two", "line one line two"},
+		{"crlf collapses", "a\r\nb", "a b"},
+		{"whitespace runs collapse", "a     b\t\tc", "a b c"},
+		{"pipes escaped", "use a|b", `use a\|b`},
+		{"trimmed", "  padded  ", "padded"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeTrigger(c.in); got != c.want {
+				t.Errorf("sanitizeTrigger(%q) = %q; want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeTriggerCapsLength(t *testing.T) {
+	long := ""
+	for i := 0; i < 500; i++ {
+		long += "x"
+	}
+	got := sanitizeTrigger(long)
+	if len(got) > 300 {
+		t.Errorf("trigger not capped: len = %d, want <= 300", len(got))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated trigger should be ellipsized, got tail %q", got[len(got)-1:])
 	}
 }

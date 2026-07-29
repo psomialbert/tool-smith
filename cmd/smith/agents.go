@@ -7,6 +7,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 )
 
 // toolEntry is one adopted tool as presented to an agent. Shared by `smith
@@ -52,4 +53,31 @@ func projectToolIndex(lock ProjLock) []toolEntry {
 		out = append(out, e)
 	}
 	return out
+}
+
+// triggerMaxLen caps an emitted trigger: long enough for a real trigger
+// sentence, short enough that one tool cannot dominate an agent's context.
+const triggerMaxLen = 300
+
+// sanitizeTrigger makes a tool's description safe to embed as a table row in an
+// agent instruction file. The description is reviewed at adoption, so this
+// narrows rather than replaces that trust boundary — but it must hold even for a
+// hostile string:
+//
+//   - HTML comment syntax is stripped, so a description cannot forge the
+//     managed-block end marker and inject content outside the block (where
+//     regeneration would never overwrite it).
+//   - newlines/whitespace runs collapse, keeping the row a single table row.
+//   - `|` is escaped so it cannot forge table columns.
+//   - length is capped.
+func sanitizeTrigger(s string) string {
+	s = strings.NewReplacer("<!--", "", "-->", "").Replace(s)
+	s = strings.Join(strings.Fields(s), " ") // collapses \n, \r\n, tabs, runs
+	s = strings.ReplaceAll(s, "|", `\|`)
+	if len(s) > triggerMaxLen {
+		// "…" (U+2026) is 3 bytes in UTF-8, so reserve room for all of them —
+		// s[:triggerMaxLen-1] would leave the result 2 bytes over cap.
+		s = strings.TrimSpace(s[:triggerMaxLen-3]) + "…"
+	}
+	return s
 }
