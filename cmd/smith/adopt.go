@@ -1069,7 +1069,9 @@ func cmdInstall(p config.Paths, args []string) error {
 	default:
 		return fmt.Errorf("unknown skills.export %q in %s (want: always | never)", fc.Skills.Export, filepath.Join(p.Home, "config.yaml"))
 	}
-	emitAgentTargets(emitCtx{p: p, fc: fc, projectDir: "."}, projectToolIndex(lock))
+	if err := emitAgentTargets(emitCtx{p: p, fc: fc, projectDir: "."}, projectToolIndex(lock)); err != nil {
+		return err
+	}
 
 	if len(vendored) > 0 {
 		fmt.Printf("installed %d tool(s) on PATH for this project (via %s)\n", len(vendored), binDir)

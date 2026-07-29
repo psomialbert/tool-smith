@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -306,14 +307,17 @@ func agentTargets() []agentTarget {
 			emit: func(ec emitCtx, tools []toolEntry) error {
 				// Unchanged from the pre-registry behavior: copy each vendored
 				// SKILL.md into the machine-global skills dir. External mise tools
-				// have no vendored SKILL.md, so Stat skips them.
+				// have no vendored SKILL.md, so Stat skips them. A copy failure for
+				// one tool must not suppress the rest — warn (naming the tool, as
+				// the pre-refactor code did) and keep going, so a single unwritable
+				// entry can't silently blank out every other tool's export.
 				for _, t := range tools {
 					src := filepath.Join(smithDir, "tools", t.Name, "SKILL.md")
 					if _, err := os.Stat(src); err != nil {
 						continue
 					}
 					if err := copyPlain(src, filepath.Join(ec.fc.SkillsDir(), t.Name, "SKILL.md")); err != nil {
-						return err
+						fmt.Fprintf(os.Stderr, "[smith] skill export failed for %s: %v\n", t.Name, err)
 					}
 				}
 				return nil
@@ -324,12 +328,48 @@ func agentTargets() []agentTarget {
 	}
 }
 
-// emitAgentTargets emits the index to every selected, detected target. Failures
-// warn and never propagate: a read-only AGENTS.md must not break `smith install`
-// (matching how the skill export has always behaved).
-func emitAgentTargets(ec emitCtx, tools []toolEntry) {
+// validateTargetNames checks configured target names against the registry, so
+// a typo in agents.targets (e.g. "agnts-md") can't silently select nothing —
+// the same failure mode the adjacent `skills.export` guard exists to prevent
+// for its own knob. Returns an error naming the unknown value(s) and listing
+// the valid names.
+func validateTargetNames(names []string) error {
+	known := agentTargets()
+	valid := make(map[string]bool, len(known))
+	validNames := make([]string, 0, len(known))
+	for _, t := range known {
+		valid[t.name] = true
+		validNames = append(validNames, t.name)
+	}
+	sort.Strings(validNames)
+	var unknown []string
+	for _, n := range names {
+		if !valid[n] {
+			unknown = append(unknown, n)
+		}
+	}
+	if len(unknown) > 0 {
+		return fmt.Errorf("unknown agents.targets %s (valid: %s)", strings.Join(unknown, ", "), strings.Join(validNames, ", "))
+	}
+	return nil
+}
+
+// emitAgentTargets emits the index to every selected, detected target.
+//
+// A misconfigured target LIST (an unknown name) is a config error and is
+// returned rather than swallowed, so `smith install` fails loudly instead of
+// silently emitting nothing for a typo'd target — mirroring the
+// `skills.export` typo guard. A per-target emission FAILURE (e.g. a read-only
+// AGENTS.md, or one tool's copy failing) is a different thing and only
+// warns, never propagates: it must not break `smith install` for the other
+// targets/tools, matching how the skill export has always behaved.
+func emitAgentTargets(ec emitCtx, tools []toolEntry) error {
+	names := resolveTargets(ec.fc)
+	if err := validateTargetNames(names); err != nil {
+		return err
+	}
 	selected := map[string]bool{}
-	for _, n := range resolveTargets(ec.fc) {
+	for _, n := range names {
 		selected[n] = true
 	}
 	for _, t := range agentTargets() {
@@ -340,4 +380,5 @@ func emitAgentTargets(ec emitCtx, tools []toolEntry) {
 			fmt.Fprintf(os.Stderr, "[smith] agent target %q: %v\n", t.name, err)
 		}
 	}
+	return nil
 }

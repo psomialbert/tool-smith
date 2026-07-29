@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -652,5 +653,135 @@ func TestEmitAgentTargetsIdempotent(t *testing.T) {
 	}
 	if string(first) != string(second) {
 		t.Errorf("emission is not idempotent:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// captureStderr redirects os.Stderr for the duration of f and returns
+// whatever was written to it. Used to assert on the [smith] warning lines the
+// agent targets print for non-fatal, warn-and-continue failures.
+func captureStderr(t *testing.T, f func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	f()
+	w.Close()
+	os.Stderr = old
+	b, _ := io.ReadAll(r)
+	return string(b)
+}
+
+// claudeTarget looks up the "claude" entry in the registry, so a test can
+// invoke its emit closure directly without going through emitAgentTargets'
+// selection/detection machinery.
+func claudeTarget(t *testing.T) agentTarget {
+	t.Helper()
+	for _, at := range agentTargets() {
+		if at.name == "claude" {
+			return at
+		}
+	}
+	t.Fatal("no \"claude\" target registered")
+	return agentTarget{}
+}
+
+// TestClaudeTargetContinuesAfterOneToolFails guards against the regression
+// caught in review: the pre-refactor inline export code warned per tool and
+// kept going on a copyPlain failure, but the first version of the registry's
+// claude emitter aborted the whole loop on the first error, silently
+// dropping every tool after the failing one. One bad tool must not suppress
+// the rest, and the warning must name the tool that failed (matching the old
+// "skill export failed for %s: %v" message).
+func TestClaudeTargetContinuesAfterOneToolFails(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeToolSkill(t, "bad", "bad tool")
+	writeToolSkill(t, "good", "good tool")
+
+	skillsDir := filepath.Join(t.TempDir(), "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Force copyPlain to fail for "bad": pre-create its destination directory
+	// slot as a plain file, so os.MkdirAll(skillsDir/bad) errors (ENOTDIR)
+	// instead of creating a directory to write bad/SKILL.md into.
+	if err := os.WriteFile(filepath.Join(skillsDir, "bad"), []byte("blocker"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ec := emitCtx{fc: config.FileConfig{Skills: config.SkillsConfig{Dir: skillsDir}}, projectDir: "."}
+	tools := []toolEntry{
+		{Name: "bad", Version: "v1", Invoke: "bad --json …", Trigger: "x"},
+		{Name: "good", Version: "v1", Invoke: "good --json …", Trigger: "x"},
+	}
+
+	target := claudeTarget(t)
+	var emitErr error
+	stderr := captureStderr(t, func() {
+		emitErr = target.emit(ec, tools)
+	})
+	if emitErr != nil {
+		t.Fatalf("claude emit must warn-and-continue, not fail the whole target: %v", emitErr)
+	}
+	if !strings.Contains(stderr, "bad") {
+		t.Errorf("warning should name the failing tool %q:\n%s", "bad", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(skillsDir, "good", "SKILL.md")); err != nil {
+		t.Errorf("second tool should still be exported despite the first failing: %v", err)
+	}
+}
+
+// TestEmitAgentTargetsRejectsUnknownTargetName is the regression guard from
+// review: a typo'd agents.targets entry (e.g. "agnts-md") must not silently
+// select nothing and let `smith install` exit 0 having emitted to no target
+// at all — the same failure mode the adjacent skills.export typo guard
+// exists to prevent for its own knob.
+func TestEmitAgentTargetsRejectsUnknownTargetName(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("AGENTS.md", []byte("# P\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ec := emitCtx{fc: config.FileConfig{Agents: config.AgentsConfig{Targets: []string{"agnts-md"}}}, projectDir: "."}
+
+	err := emitAgentTargets(ec, []toolEntry{{Name: "calc", Version: "v1", Invoke: "calc --json …", Trigger: "x"}})
+	if err == nil {
+		t.Fatal("want an error for an unknown target name")
+	}
+	if !strings.Contains(err.Error(), "agnts-md") {
+		t.Errorf("error should name the unknown target: %v", err)
+	}
+	// The file must be untouched: a config error must not partially apply.
+	got, rerr := os.ReadFile("AGENTS.md")
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(got) != "# P\n" {
+		t.Errorf("AGENTS.md should be untouched when the target list is invalid:\n%s", got)
+	}
+}
+
+// TestEmitAgentTargetsValidListStillWorks is the companion check: a
+// well-formed agents.targets list must not be affected by the new
+// validation.
+func TestEmitAgentTargetsValidListStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("AGENTS.md", []byte("# P\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ec := emitCtx{fc: config.FileConfig{Agents: config.AgentsConfig{Targets: []string{"agents-md"}}}, projectDir: "."}
+
+	if err := emitAgentTargets(ec, []toolEntry{{Name: "calc", Version: "v1", Invoke: "calc --json …", Trigger: "x"}}); err != nil {
+		t.Fatalf("valid target list should not error: %v", err)
+	}
+	got, err := os.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "calc") {
+		t.Errorf("AGENTS.md not updated:\n%s", got)
 	}
 }
