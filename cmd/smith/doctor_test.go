@@ -298,3 +298,178 @@ func TestDoctorRejectsBothScopes(t *testing.T) {
 		t.Fatalf("--machine --project must error, got: %v", err)
 	}
 }
+
+func findFinding(fs []finding, check string) (finding, bool) {
+	for _, f := range fs {
+		if f.Check == check {
+			return f, true
+		}
+	}
+	return finding{}, false
+}
+
+// A project with tools adopted and a current block is healthy.
+func TestAgentsBlockCheckOK(t *testing.T) {
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(smithDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := ProjLock{Tools: map[string]ProjTool{
+		"calc": {Version: "v1", Runtime: "bash", Entrypoint: "calc"},
+	}}
+	if err := saveProjLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	block := renderAgentBlock(projectToolIndex(lock))
+	if err := os.WriteFile("AGENTS.md", []byte("# P\n\n"+block), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dc := docCtx{p: p, projectDir: ".", lock: lock}
+	f, ok := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block")
+	if !ok {
+		t.Fatal("agents-block check did not report")
+	}
+	if f.Severity != sevOK {
+		t.Errorf("severity = %q (%s); want ok", f.Severity, f.Message)
+	}
+}
+
+// A stale block is a fixable warning, and --fix regenerates it.
+func TestAgentsBlockCheckStaleIsFixed(t *testing.T) {
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(smithDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := ProjLock{Tools: map[string]ProjTool{
+		"calc": {Version: "v2", Runtime: "bash", Entrypoint: "calc"},
+	}}
+	if err := saveProjLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	stale := agentBlockBeginPrefix + " -->\n## Project tools (smith)\n\nSTALE\n" + agentBlockEnd + "\n"
+	if err := os.WriteFile("AGENTS.md", []byte("# P\n\n"+stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dc := docCtx{p: p, projectDir: ".", lock: lock}
+
+	f, _ := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block")
+	if f.Severity != sevWARN || !f.Fixable {
+		t.Fatalf("stale block should be a fixable warn, got %q fixable=%v", f.Severity, f.Fixable)
+	}
+
+	f, _ = findFinding(runDoctor(dc, doctorChecks(), true), "agents-block")
+	if f.Severity != sevOK || !f.Fixed {
+		t.Errorf("--fix should refresh the block; got %q fixed=%v (%s)", f.Severity, f.Fixed, f.Message)
+	}
+	got, err := os.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "STALE") {
+		t.Errorf("stale content survived --fix:\n%s", got)
+	}
+}
+
+// No agent instruction file at all: informational, not a warning — plenty of
+// projects deliberately have none. --fix creates AGENTS.md (never CLAUDE.md).
+func TestAgentsBlockCheckMissingFileIsInfoAndFixCreatesAgentsMD(t *testing.T) {
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(smithDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := ProjLock{Tools: map[string]ProjTool{
+		"calc": {Version: "v1", Runtime: "bash", Entrypoint: "calc"},
+	}}
+	if err := saveProjLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	dc := docCtx{p: p, projectDir: ".", lock: lock}
+
+	f, _ := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block")
+	if f.Severity != sevINFO {
+		t.Errorf("missing agent file should be info, got %q", f.Severity)
+	}
+	if !f.Fixable {
+		t.Error("missing agent file should be fixable")
+	}
+
+	runDoctor(dc, doctorChecks(), true)
+	if _, err := os.Stat("AGENTS.md"); err != nil {
+		t.Errorf("--fix should have created AGENTS.md: %v", err)
+	}
+	if _, err := os.Stat("CLAUDE.md"); !os.IsNotExist(err) {
+		t.Error("--fix must not create CLAUDE.md; that would presume Claude")
+	}
+}
+
+// Nothing adopted: an empty table is noise, so stay silent.
+func TestAgentsBlockCheckSilentWithNoTools(t *testing.T) {
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(smithDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveProjLock(ProjLock{Tools: map[string]ProjTool{}}); err != nil {
+		t.Fatal(err)
+	}
+	dc := docCtx{p: p, projectDir: ".", lock: ProjLock{Tools: map[string]ProjTool{}}}
+
+	if f, ok := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block"); ok {
+		t.Errorf("no tools adopted — check should not report, got %q", f.Message)
+	}
+}
+
+// sevINFO must not fail the exit code.
+func TestInfoSeverityDoesNotFailExit(t *testing.T) {
+	if got := doctorExit([]finding{{Severity: sevINFO}}); got != 0 {
+		t.Errorf("doctorExit with info = %d; want 0", got)
+	}
+}
+
+// With both files present, a stale CLAUDE.md beside a current AGENTS.md must
+// still be reported and fixed — emitAgentTargets writes both, so checking only
+// the first would leave one silently rotting.
+func TestAgentsBlockCheckDetectsStaleSecondFile(t *testing.T) {
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(smithDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := ProjLock{Tools: map[string]ProjTool{
+		"calc": {Version: "v1", Runtime: "bash", Entrypoint: "calc"},
+	}}
+	if err := saveProjLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	block := renderAgentBlock(projectToolIndex(lock))
+	// AGENTS.md current, CLAUDE.md stale.
+	if err := os.WriteFile("AGENTS.md", []byte("# P\n\n"+block), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staleBlock := agentBlockBeginPrefix + " -->\nSTALE\n" + agentBlockEnd + "\n"
+	if err := os.WriteFile("CLAUDE.md", []byte("# P\n\n"+staleBlock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dc := docCtx{p: p, projectDir: ".", lock: lock}
+
+	f, _ := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block")
+	if f.Severity != sevWARN {
+		t.Fatalf("stale CLAUDE.md not reported: severity %q (%s)", f.Severity, f.Message)
+	}
+	if !strings.Contains(f.Message, "CLAUDE.md") {
+		t.Errorf("message should name the stale file, got: %s", f.Message)
+	}
+
+	runDoctor(dc, doctorChecks(), true)
+	got, err := os.ReadFile("CLAUDE.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "STALE") {
+		t.Errorf("--fix did not refresh CLAUDE.md:\n%s", got)
+	}
+}

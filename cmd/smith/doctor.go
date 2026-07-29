@@ -16,6 +16,7 @@ import (
 
 const (
 	sevOK    = "ok"
+	sevINFO  = "info"
 	sevWARN  = "warn"
 	sevERROR = "error"
 
@@ -117,11 +118,13 @@ func doctorExit(fs []finding) int {
 // renderDoctor returns the report as a string (human or json), keeping it
 // unit-testable; cmdDoctor prints it.
 func renderDoctor(dc docCtx, fs []finding, asJSON bool) string {
-	ok, warn, errc := 0, 0, 0
+	ok, info, warn, errc := 0, 0, 0, 0
 	for _, f := range fs {
 		switch f.Severity {
 		case sevOK:
 			ok++
+		case sevINFO:
+			info++
 		case sevWARN:
 			warn++
 		case sevERROR:
@@ -137,11 +140,11 @@ func renderDoctor(dc docCtx, fs []finding, asJSON bool) string {
 		b, _ := json.MarshalIndent(payload{
 			Project:  dc.projectDir,
 			Findings: fs,
-			Summary:  map[string]int{"ok": ok, "warn": warn, "error": errc},
+			Summary:  map[string]int{"ok": ok, "info": info, "warn": warn, "error": errc},
 		}, "", "  ")
 		return string(b)
 	}
-	glyph := map[string]string{sevOK: "✓", sevWARN: "⚠", sevERROR: "✗"}
+	glyph := map[string]string{sevOK: "✓", sevINFO: "ℹ", sevWARN: "⚠", sevERROR: "✗"}
 	var b strings.Builder
 	for _, sc := range []string{scopeMachine, scopeProject} {
 		var lines []string
@@ -161,7 +164,7 @@ func renderDoctor(dc docCtx, fs []finding, asJSON bool) string {
 			fmt.Fprintf(&b, "%s\n%s\n", sc, strings.Join(lines, "\n"))
 		}
 	}
-	fmt.Fprintf(&b, "\n%d ok · %d warnings · %d errors\n", ok, warn, errc)
+	fmt.Fprintf(&b, "\n%d ok · %d info · %d warnings · %d errors\n", ok, info, warn, errc)
 	return b.String()
 }
 
@@ -227,6 +230,46 @@ func skillDescription(skillPath string) string {
 		}
 	}
 	return ""
+}
+
+// agentInstructionFiles are the project-scoped agent instruction files smith
+// keeps a managed block in, in preference order. Must stay in sync with the
+// *-md targets in agentTargets().
+var agentInstructionFiles = []string{"AGENTS.md", "CLAUDE.md"}
+
+// agentBlockState reports the agent-instruction-file state for the project.
+// Shared by the agents-block check's diagnose and apply halves so detection
+// lives in one place.
+//
+// stale lists EVERY existing file whose block is missing or out of date — not
+// just the first. emitAgentTargets writes all detected files, so returning
+// early on the first healthy one would let a stale CLAUDE.md sit unreported
+// beside a current AGENTS.md. present is true when at least one of the files
+// exists; when it is false, create is the AGENTS.md path to create.
+func agentBlockState(dc docCtx) (stale []string, present bool, create string) {
+	want := strings.TrimRight(renderAgentBlock(projectToolIndex(dc.lock)), "\n")
+	for _, name := range agentInstructionFiles {
+		p := filepath.Join(dc.projectDir, name)
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		present = true
+		if !strings.Contains(string(raw), want) {
+			stale = append(stale, p)
+		}
+	}
+	return stale, present, filepath.Join(dc.projectDir, agentInstructionFiles[0])
+}
+
+// mustAbs resolves dir to an absolute path, falling back to dir on error — used
+// only to derive a heading, so a failure is cosmetic.
+func mustAbs(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	return abs
 }
 
 // doctorChecks is the full registry, in report order.
@@ -354,6 +397,52 @@ func doctorChecks() []check {
 				return []finding{f}
 			},
 			apply: func(dc docCtx) error { return ensureProjectGitignore() },
+		},
+		{
+			name: "agents-block", scope: scopeProject,
+			diagnose: func(dc docCtx) []finding {
+				// Nothing adopted: an empty table is noise, not help.
+				if len(dc.lock.Tools) == 0 {
+					return nil
+				}
+				stale, present, create := agentBlockState(dc)
+				f := finding{Check: "agents-block", Scope: scopeProject}
+				switch {
+				case !present:
+					f.Severity = sevINFO
+					f.Fixable = true
+					f.Message = "no " + filepath.Base(create) + " — agents can't see this project's tools without running `smith lens`"
+					f.FixHint = "smith doctor --fix (creates " + filepath.Base(create) + ")"
+				case len(stale) > 0:
+					f.Severity = sevWARN
+					f.Fixable = true
+					f.Message = "the smith tool block is missing or out of date in " + strings.Join(stale, ", ")
+					f.FixHint = "smith doctor --fix (or smith install)"
+				default:
+					f.Severity = sevOK
+					f.Message = "agent tool index current"
+				}
+				return []finding{f}
+			},
+			apply: func(dc docCtx) error {
+				stale, present, create := agentBlockState(dc)
+				block := renderAgentBlock(projectToolIndex(dc.lock))
+				if !present {
+					// Create AGENTS.md — the cross-agent convention. Never
+					// CLAUDE.md, which would presume a specific agent.
+					if err := writeFileAtomic(create, []byte("# "+filepath.Base(mustAbs(dc.projectDir))+"\n"), 0o644); err != nil {
+						return err
+					}
+					return upsertManagedBlock(create, block)
+				}
+				// Refresh every stale file, not just the first.
+				for _, p := range stale {
+					if err := upsertManagedBlock(p, block); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
 		},
 		{
 			name: "tracked-mise-local", scope: scopeProject,
