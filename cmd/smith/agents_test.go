@@ -121,3 +121,124 @@ func TestSanitizeTriggerCapsLengthUTF8(t *testing.T) {
 		}
 	}
 }
+
+func TestUpsertManagedBlockAppendsWhenAbsent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	original := "# My project\n\nHand-written guidance.\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	block := agentBlockBeginPrefix + " -->\n## Project tools (smith)\n" + agentBlockEnd
+
+	if err := upsertManagedBlock(path, block); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(got), original) {
+		t.Errorf("hand-written content was not preserved verbatim:\n%s", got)
+	}
+	if !strings.Contains(string(got), "## Project tools (smith)") {
+		t.Errorf("block not appended:\n%s", got)
+	}
+}
+
+func TestUpsertManagedBlockReplacesAndIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	before := "# Project\n\nkeep me\n"
+	after := "\n## trailing section\n\nkeep me too\n"
+	old := agentBlockBeginPrefix + " -->\nOLD CONTENT\n" + agentBlockEnd
+	if err := os.WriteFile(path, []byte(before+old+after), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fresh := agentBlockBeginPrefix + " -->\nNEW CONTENT\n" + agentBlockEnd
+
+	if err := upsertManagedBlock(path, fresh); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(first)
+	if strings.Contains(s, "OLD CONTENT") {
+		t.Error("stale block content survived the replace")
+	}
+	if !strings.Contains(s, "NEW CONTENT") {
+		t.Error("fresh block was not written")
+	}
+	if !strings.HasPrefix(s, before) || !strings.HasSuffix(s, after) {
+		t.Errorf("content outside the markers was disturbed:\n%s", s)
+	}
+
+	// Idempotent: emitting the same block again must not churn the file.
+	if err := upsertManagedBlock(path, fresh); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(second) != string(first) {
+		t.Errorf("second upsert changed the file:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+func TestUpsertManagedBlockRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.md")
+	if err := os.WriteFile(real, []byte("# real\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "AGENTS.md")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	err := upsertManagedBlock(link, "block")
+	if err == nil {
+		t.Fatal("want an error for a symlinked target")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error should name the symlink, got: %v", err)
+	}
+	// The link target must be untouched — an atomic rename would have replaced
+	// the symlink itself, silently detaching the user's setup.
+	got, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "# real\n" {
+		t.Errorf("symlink target was modified: %q", got)
+	}
+}
+
+func TestUpsertManagedBlockRefusesDuplicateMarkers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	dup := agentBlockBeginPrefix + " -->\nA\n" + agentBlockEnd + "\n" +
+		agentBlockBeginPrefix + " -->\nB\n" + agentBlockEnd + "\n"
+	if err := os.WriteFile(path, []byte(dup), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := upsertManagedBlock(path, "fresh")
+	if err == nil {
+		t.Fatal("want an error when the file has two smith blocks")
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != dup {
+		t.Error("file was modified despite the ambiguity; it must be left alone")
+	}
+}
+
+func TestUpsertManagedBlockMissingFile(t *testing.T) {
+	err := upsertManagedBlock(filepath.Join(t.TempDir(), "nope.md"), "block")
+	if err == nil {
+		t.Fatal("want an error for a missing file — smith never creates one during install")
+	}
+}
