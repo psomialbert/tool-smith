@@ -13,9 +13,11 @@ package main
 // time; the human reviews the vendored source in the PR.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1148,7 +1150,8 @@ func ensureProjectGitignore() error {
 
 func cmdSearch(p config.Paths, args []string) error {
 	if _, err := exec.LookPath("gh"); err != nil {
-		return fmt.Errorf("smith search needs the gh CLI")
+		return fmt.Errorf("smith search needs the gh CLI (https://cli.github.com), authenticated via `gh auth login`; " +
+			"discovery is the only command that needs it — `smith use <owner/repo>@<ver>` works unauthenticated")
 	}
 	query := strings.Join(args, " ")
 	ghArgs := []string{"search", "repos", "--topic", "smith-tool",
@@ -1157,8 +1160,21 @@ func cmdSearch(p config.Paths, args []string) error {
 		ghArgs = append(ghArgs, query)
 	}
 	cmd := exec.Command("gh", ghArgs...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		// `gh search repos` requires auth, and its bare "exit status 4" tells a
+		// newcomer nothing. Name the likely cause and keep them moving: search is
+		// the only command that needs gh — adopting by name does not.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 4 {
+			return fmt.Errorf("gh is not authenticated — run `gh auth login`, " +
+				"or skip discovery: `smith use <owner/repo>@<ver>` works unauthenticated")
+		}
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("gh search failed: %w: %s", err, msg)
+		}
 		return fmt.Errorf("gh search failed: %w", err)
 	}
 	var repos []struct {
