@@ -1066,7 +1066,7 @@ In `cmd/smith/adopt.go`, replace the inline export block at lines 1070-1086 (the
 	emitAgentTargets(emitCtx{p: p, fc: fc, projectDir: "."}, projectToolIndex(lock))
 ```
 
-Confirm the surrounding function still has `lock` in scope at that point; if it is named differently there, use that variable. If `names` becomes unused, remove it.
+The lockfile variable in `cmdInstall` is named `lock` (assigned at `adopt.go:984`), so `projectToolIndex(lock)` compiles as written. The local `names` slice (built at `adopt.go:995-999`) is used by earlier loops in the function — leave it alone; only the export loop is being replaced.
 
 - [ ] **Step 12: Add the migrate round-trip test**
 
@@ -1279,6 +1279,50 @@ func TestInfoSeverityDoesNotFailExit(t *testing.T) {
 		t.Errorf("doctorExit with info = %d; want 0", got)
 	}
 }
+
+// With both files present, a stale CLAUDE.md beside a current AGENTS.md must
+// still be reported and fixed — emitAgentTargets writes both, so checking only
+// the first would leave one silently rotting.
+func TestAgentsBlockCheckDetectsStaleSecondFile(t *testing.T) {
+	p := testPaths(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(smithDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := ProjLock{Tools: map[string]ProjTool{
+		"calc": {Version: "v1", Runtime: "bash", Entrypoint: "calc"},
+	}}
+	if err := saveProjLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	block := renderAgentBlock(projectToolIndex(lock))
+	// AGENTS.md current, CLAUDE.md stale.
+	if err := os.WriteFile("AGENTS.md", []byte("# P\n\n"+block), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staleBlock := agentBlockBeginPrefix + " -->\nSTALE\n" + agentBlockEnd + "\n"
+	if err := os.WriteFile("CLAUDE.md", []byte("# P\n\n"+staleBlock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dc := docCtx{p: p, projectDir: ".", lock: lock}
+
+	f, _ := findFinding(runDoctor(dc, doctorChecks(), false), "agents-block")
+	if f.Severity != sevWARN {
+		t.Fatalf("stale CLAUDE.md not reported: severity %q (%s)", f.Severity, f.Message)
+	}
+	if !strings.Contains(f.Message, "CLAUDE.md") {
+		t.Errorf("message should name the stale file, got: %s", f.Message)
+	}
+
+	runDoctor(dc, doctorChecks(), true)
+	got, err := os.ReadFile("CLAUDE.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "STALE") {
+		t.Errorf("--fix did not refresh CLAUDE.md:\n%s", got)
+	}
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1351,24 +1395,34 @@ with:
 Add to `cmd/smith/doctor.go` (near the other shared halves):
 
 ```go
+// agentInstructionFiles are the project-scoped agent instruction files smith
+// keeps a managed block in, in preference order. Must stay in sync with the
+// *-md targets in agentTargets().
+var agentInstructionFiles = []string{"AGENTS.md", "CLAUDE.md"}
+
 // agentBlockState reports the agent-instruction-file state for the project.
 // Shared by the agents-block check's diagnose and apply halves so detection
-// lives in one place. path is the file to write; missingFile is true when no
-// agent instruction file exists yet (path is then the AGENTS.md to create).
-func agentBlockState(dc docCtx) (path string, missingFile bool, stale bool) {
-	want := renderAgentBlock(projectToolIndex(dc.lock))
-	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+// lives in one place.
+//
+// stale lists EVERY existing file whose block is missing or out of date — not
+// just the first. emitAgentTargets writes all detected files, so returning
+// early on the first healthy one would let a stale CLAUDE.md sit unreported
+// beside a current AGENTS.md. present is true when at least one of the files
+// exists; when it is false, create is the AGENTS.md path to create.
+func agentBlockState(dc docCtx) (stale []string, present bool, create string) {
+	want := strings.TrimRight(renderAgentBlock(projectToolIndex(dc.lock)), "\n")
+	for _, name := range agentInstructionFiles {
 		p := filepath.Join(dc.projectDir, name)
 		raw, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		if !strings.Contains(string(raw), strings.TrimRight(want, "\n")) {
-			return p, false, true
+		present = true
+		if !strings.Contains(string(raw), want) {
+			stale = append(stale, p)
 		}
-		return p, false, false
 	}
-	return filepath.Join(dc.projectDir, "AGENTS.md"), true, true
+	return stale, present, filepath.Join(dc.projectDir, agentInstructionFiles[0])
 }
 ```
 
@@ -1382,35 +1436,43 @@ Add to the `doctorChecks()` registry (project-scoped, alongside `gitignore`):
 				if len(dc.lock.Tools) == 0 {
 					return nil
 				}
-				path, missing, stale := agentBlockState(dc)
+				stale, present, create := agentBlockState(dc)
 				f := finding{Check: "agents-block", Scope: scopeProject}
 				switch {
-				case missing:
+				case !present:
 					f.Severity = sevINFO
 					f.Fixable = true
-					f.Message = "no AGENTS.md — agents can't see this project's tools without running `smith lens`"
-					f.FixHint = "smith doctor --fix (creates AGENTS.md)"
-				case stale:
+					f.Message = "no " + filepath.Base(create) + " — agents can't see this project's tools without running `smith lens`"
+					f.FixHint = "smith doctor --fix (creates " + filepath.Base(create) + ")"
+				case len(stale) > 0:
 					f.Severity = sevWARN
 					f.Fixable = true
-					f.Message = "the smith block in " + path + " is out of date"
+					f.Message = "the smith tool block is missing or out of date in " + strings.Join(stale, ", ")
 					f.FixHint = "smith doctor --fix (or smith install)"
 				default:
 					f.Severity = sevOK
-					f.Message = "agent tool index current in " + path
+					f.Message = "agent tool index current"
 				}
 				return []finding{f}
 			},
 			apply: func(dc docCtx) error {
-				path, missing, _ := agentBlockState(dc)
-				if missing {
+				stale, present, create := agentBlockState(dc)
+				block := renderAgentBlock(projectToolIndex(dc.lock))
+				if !present {
 					// Create AGENTS.md — the cross-agent convention. Never
 					// CLAUDE.md, which would presume a specific agent.
-					if err := writeFileAtomic(path, []byte("# "+filepath.Base(mustAbs(dc.projectDir))+"\n"), 0o644); err != nil {
+					if err := writeFileAtomic(create, []byte("# "+filepath.Base(mustAbs(dc.projectDir))+"\n"), 0o644); err != nil {
+						return err
+					}
+					return upsertManagedBlock(create, block)
+				}
+				// Refresh every stale file, not just the first.
+				for _, p := range stale {
+					if err := upsertManagedBlock(p, block); err != nil {
 						return err
 					}
 				}
-				return upsertManagedBlock(path, renderAgentBlock(projectToolIndex(dc.lock)))
+				return nil
 			},
 		},
 ```
