@@ -62,6 +62,11 @@ sync silently. **Before committing, verify each still matches actual behavior:**
   (`activationState`, `gitignoreMissing`, `materializeTool`, `diagnoseV1Home`,
   `bundleHash`, `sandbox.Functional`) — don't duplicate detection. `--fix` runs
   only fixable (safe/reversible) checks and never runs git.
+- **Add an agent target** (`agentTargets()` in `cmd/smith/agents.go`) → give it a
+  `scope` (machine vs project — the claude export is machine-global, see the
+  multi-agent spec's Known limits), keep `emit` idempotent (a non-idempotent
+  emitter churns a tracked file on every `smith install`), and document it in
+  `README.md` + the `agents.targets` list.
 
 ## Human-owned commands
 

@@ -50,6 +50,23 @@ agent into adopting or running something it shouldn't.
   `~/.config`, `~/.local/bin`, `~/Library/LaunchAgents`, `~/bin`, or a shell rc
   file is denied by default without smith having to enumerate each one. A tool's
   own scratch needs are already covered by the always-granted CWD + TMP.
+- **Agent-instruction emission is sanitized, not just adoption-reviewed.**
+  `smith install` writes each adopted tool's name, version, invoke form, and
+  `SKILL.md` description (its "trigger") into agent-facing surfaces: the
+  machine-global skills dir, and a managed block inside a project's
+  `AGENTS.md`/`CLAUDE.md` when one already exists. Those values are already
+  covered by the adoption trust gate — `SKILL.md` is vendored source, reviewed
+  in the adoption PR like any other file — but the emitted block itself closes
+  a narrower, separate hole: a description containing HTML comment syntax
+  could otherwise forge the block's own `<!-- smith:end -->` marker and smuggle
+  content past it, into the untouched "tail" of the file that regeneration
+  never rewrites — a permanent foothold surviving every future `smith
+  install`. `sanitizeTrigger` (and `escapeTableCell` for the Name/Version/Invoke
+  cells) strips HTML comment syntax, collapses whitespace, escapes `|`, and
+  caps length before any of these values reach the file, so this holds even if
+  a reviewer waves a hostile-looking description through. This **narrows**
+  the adoption boundary rather than replacing it: the description was already
+  human-reviewed before it could reach here.
 - **Integrity / reproducibility.** Each vendored bundle is content-hashed and
   pinned. `smith install` and `smith verify --frozen` re-hash and refuse on
   mismatch (go.sum-style), so a tampered vendored tree is caught, and a teammate
