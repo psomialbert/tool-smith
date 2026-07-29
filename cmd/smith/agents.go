@@ -154,8 +154,17 @@ func upsertManagedBlock(path, block string) error {
 	begin := strings.Index(text, agentBlockBeginPrefix)
 	switch {
 	case begin < 0:
-		// Append, separated by exactly one blank line.
-		out = strings.TrimRight(text, "\n") + "\n\n" + strings.TrimRight(block, "\n") + "\n"
+		// Append, separated by exactly one blank line, matching the file's
+		// existing line-ending convention. strings.TrimRight(text, "\n") alone
+		// would strip only the bare "\n" of a CRLF file's trailing "\r\n",
+		// leaving a dangling "\r" and then splicing in an LF-only blank line —
+		// mutating a byte outside the markers on the very first append.
+		newline := "\n"
+		if strings.Contains(text, "\r\n") {
+			newline = "\r\n"
+		}
+		trimmed := strings.TrimRight(text, "\r\n")
+		out = trimmed + newline + newline + strings.TrimRight(block, "\n") + newline
 	default:
 		endIdx := strings.Index(text[begin:], agentBlockEnd)
 		if endIdx < 0 {

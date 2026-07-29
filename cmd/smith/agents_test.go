@@ -242,3 +242,108 @@ func TestUpsertManagedBlockMissingFile(t *testing.T) {
 		t.Fatal("want an error for a missing file — smith never creates one during install")
 	}
 }
+
+// TestUpsertManagedBlockAppendPreservesCRLF guards against a regression where
+// the append path trimmed only the bare "\n" of a CRLF file's trailing
+// "\r\n", leaving a dangling "\r" and then splicing in an LF-only blank line
+// — mutating a byte outside the markers on the very first append into a
+// CRLF-authored file.
+func TestUpsertManagedBlockAppendPreservesCRLF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	original := "# My project\r\n\r\nHand-written guidance.\r\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	block := agentBlockBeginPrefix + " -->\n## Project tools (smith)\n" + agentBlockEnd
+
+	if err := upsertManagedBlock(path, block); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+
+	if !strings.HasPrefix(s, original) {
+		t.Fatalf("hand-written CRLF content was not preserved byte-for-byte:\n%q", s)
+	}
+	// Exactly one CRLF separates the preserved content (which already ends in
+	// its own CRLF) from the appended block — a bare "\n" here would be a
+	// dangling "\r" or a mixed-convention blank line.
+	rest := strings.TrimPrefix(s, original)
+	if !strings.HasPrefix(rest, "\r\n"+agentBlockBeginPrefix) {
+		t.Errorf("separator between preserved content and block is not a single CRLF (dangling \\r or mixed line endings): %q", rest)
+	}
+	// Full byte-exact expectation: preserved content, one CRLF separator, the
+	// block verbatim, then a trailing CRLF matching the file's convention.
+	want := original + "\r\n" + block + "\r\n"
+	if s != want {
+		t.Errorf("CRLF append output mismatch:\ngot:  %q\nwant: %q", s, want)
+	}
+}
+
+// TestUpsertManagedBlockAppendPreservesLF is a regression guard for the
+// common case: appending into an LF file must keep behaving exactly as
+// before the CRLF fix.
+func TestUpsertManagedBlockAppendPreservesLF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	original := "# My project\n\nHand-written guidance.\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	block := agentBlockBeginPrefix + " -->\n## Project tools (smith)\n" + agentBlockEnd
+
+	if err := upsertManagedBlock(path, block); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	if !strings.HasPrefix(s, original) {
+		t.Errorf("hand-written content was not preserved verbatim:\n%s", s)
+	}
+	if strings.Contains(s, "\r") {
+		t.Errorf("LF file gained a carriage return: %q", s)
+	}
+	want := original + "\n" + block + "\n"
+	if s != want {
+		t.Errorf("LF append output changed:\ngot:  %q\nwant: %q", s, want)
+	}
+}
+
+// TestUpsertManagedBlockCRLFIdempotent is the load-bearing property for a
+// CRLF-authored, git-tracked file: writing the same block twice must leave
+// the file byte-identical, or every `smith install` would produce a
+// spurious diff.
+func TestUpsertManagedBlockCRLFIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	original := "# My project\r\n\r\nHand-written guidance.\r\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	block := agentBlockBeginPrefix + " -->\n## Project tools (smith)\n" + agentBlockEnd
+
+	if err := upsertManagedBlock(path, block); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertManagedBlock(path, block); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(second) != string(first) {
+		t.Errorf("second upsert on a CRLF file changed it:\nfirst:\n%q\nsecond:\n%q", first, second)
+	}
+}
