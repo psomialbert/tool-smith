@@ -217,6 +217,24 @@ the adoption is committed/merged and `smith install` runs.
 For every runtime the PR diff is reviewable source, portable across
 teammates' platforms; build/warm happens locally at install.
 
+**Multiple source files.** A tool isn't limited to one file — declare what it
+consists of in its manifest and every listed file is vendored, hashed and
+re-verified together:
+
+```yaml
+sources: [main.go, internal/, templates/]
+```
+
+Directories are walked recursively; entries must stay inside the repo and
+symlinks are refused. Omit `sources:` and a tool keeps the single-file layout
+with a byte-identical hash, so nothing already adopted changes. A multi-file
+`go` tool builds as a package and therefore needs a `go.mod` (`go mod init
+<name>`), which joins the reviewed bundle automatically — third-party modules
+still fail closed at adopt time, because multi-file is not multi-dependency.
+
+Caps of 200 files / 2 MiB keep the review surface honest: the adoption PR is the
+trust gate, and a tool nobody can read is a tool nobody can vouch for.
+
 ## Third-party CLIs (via mise)
 
 To standardize an existing third-party CLI — not a smith tool — across a project:

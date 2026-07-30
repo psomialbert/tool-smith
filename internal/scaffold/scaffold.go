@@ -57,6 +57,14 @@ type Manifest struct {
 	Runtime     string       `yaml:"runtime"`
 	Entrypoint  string       `yaml:"entrypoint"`        // file in the draft dir that becomes bin/<name>
 	Sandbox     *SandboxSpec `yaml:"sandbox,omitempty"` // per-tool grants beyond the strict default
+	// Sources opts a tool into multiple source files. Absent = the legacy
+	// single-file set (one source per runtime + the meta files), whose bundle
+	// hash must stay byte-identical or every already-adopted tool breaks.
+	// Present = the tool's source is exactly these entries; a directory is
+	// walked recursively. Explicit rather than "walk the repo" so a tool can't
+	// silently vendor junk, and so the reviewer gets a one-line statement of
+	// what the tool consists of.
+	Sources []string `yaml:"sources,omitempty"`
 }
 
 // SandboxSpec is the tool's requested sandbox relaxations (its declared

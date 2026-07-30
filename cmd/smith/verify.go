@@ -50,7 +50,15 @@ func cmdVerify(p config.Paths, args []string) error {
 			bad++
 			continue
 		}
-		src := sourceFiles(t.Runtime, t.Entrypoint, name)
+		src, serr := vendoredSourceFiles(dir, t, name)
+		if serr != nil {
+			// A `sources:` list that no longer resolves against the vendored tree
+			// (a listed file deleted, a symlink introduced) is an integrity
+			// failure, not a crash — report it like any other bad tool.
+			results = append(results, result{name, "error", serr.Error()})
+			bad++
+			continue
+		}
 		sum, herr := bundleHash(dir, src)
 		extra, xerr := unexpectedFiles(dir, src)
 		switch {

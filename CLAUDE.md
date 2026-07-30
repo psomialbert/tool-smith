@@ -34,8 +34,16 @@ sync silently. **Before committing, verify each still matches actual behavior:**
   a live key missing from it gets **stripped as "retired"** by `smith migrate`.
 - **Add a runtime** (`internal/scaffold/Runtimes`) → scaffold template
   `tool.<runtime>`, `SourceFile`, `sourceFiles`/materialize switch in
-  `adopt.go`, the `--runtime` help in `cmdNew` + `usage()`, and the skill's
-  Runtimes section.
+  `adopt.go`, the `--runtime` help in `cmdNew` + `usage()`, the skill's
+  Runtimes section, and `smith contract` (`contract_test.go` pins the list).
+- **Touch what decides a tool's file set** — `sourceFiles` (legacy) or
+  `resolveSources` (`sources:`) — → this is the input to `bundleHash`, so a
+  change to the LEGACY set re-hashes every already-adopted tool and makes
+  `install`/`verify` refuse them all. `TestLegacyBundleHashUnchanged` pins that
+  digest deliberately; if it fails, you have a migration on your hands, not a
+  digest to update. All consumers go through `toolSourceFiles` /
+  `vendoredSourceFiles` (adopt, install, verify, 2 doctor checks, diff) — keep
+  it that way rather than re-deriving a list at a call site.
 - **Change the adoption/trust flow** → cli-creator skill, README, and the tool
   template README all describe it; update together.
 - **Change the adopt pipeline** (clone → checkout → self-test → vendor → pin) →

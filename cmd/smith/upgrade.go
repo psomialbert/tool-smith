@@ -294,7 +294,14 @@ func cmdDiff(p config.Paths, args []string) error {
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		return err
 	}
-	for _, f := range sourceFiles(t.Runtime, t.Entrypoint, name) {
+	// Resolve against the CLONE at the target version, not the vendored copy:
+	// the version being previewed may add, remove or rename source files, and a
+	// diff computed from the old file set would hide exactly that.
+	targetSrc, serr := toolSourceFiles(clone, t.Runtime, t.Entrypoint, name, vendoredSources(clone))
+	if serr != nil {
+		return serr
+	}
+	for _, f := range targetSrc {
 		raw, rerr := os.ReadFile(filepath.Join(clone, f))
 		if os.IsNotExist(rerr) {
 			continue
@@ -308,7 +315,11 @@ func cmdDiff(p config.Paths, args []string) error {
 		if f == t.Entrypoint || f == "selftest.sh" {
 			mode = 0o755
 		}
-		if err := os.WriteFile(filepath.Join(target, f), raw, mode); err != nil {
+		out := filepath.Join(target, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(out, raw, mode); err != nil {
 			return err
 		}
 	}
