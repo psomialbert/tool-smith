@@ -1,3 +1,7 @@
 /smith
 /store/
 dist/
+# Scratch from agent-driven development runs (ledgers, briefs, review packages).
+# These tools assume this path is ignored; it wasn't, so the scratch was one
+# `git add -A` away from being committed.
+.superpowers/

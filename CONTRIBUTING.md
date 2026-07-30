@@ -71,7 +71,7 @@ automatically as a side effect of something else.
 ## Scope
 
 Ideas beyond the current surface live in
-`docs/superpowers/specs/2026-07-21-smith-feature-landscape.md`. If you're
+`docs/design/2026-07-21-smith-feature-landscape.md`. If you're
 planning something substantial, open an issue or a discussion first — it's
 cheaper than finding out in review that the design conflicts with the trust
 model.
