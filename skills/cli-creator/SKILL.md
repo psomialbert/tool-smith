@@ -145,6 +145,20 @@ need, and prefer designs that need none (read stdin, write stdout/CWD).
   an offline launcher. Use this when you need third-party Python packages;
   never let sandboxed code write a shared package cache (a poisoning vector).
 
+**A tool is not limited to one file.** If the operation deserves structure, list
+what it consists of in `manifest.yaml` — every entry is vendored, hashed and
+re-verified together, directories walked recursively:
+
+```yaml
+sources: [main.go, internal/, templates/]
+```
+
+Entries must stay inside the repo; symlinks are refused. Omit `sources:` for the
+single-file layout. A multi-file `go` tool builds as a package, so add a `go.mod`
+(`go mod init <name>`) — it joins the bundle automatically. Third-party modules
+still fail closed: multi-file is not multi-dependency. Keep it under 200 files /
+2 MiB, because the human reviewing the adoption PR is the trust gate.
+
 ## Versioning
 
 Semver in `manifest.yaml` (human intent) + a matching git tag (`v<x.y.z>`).

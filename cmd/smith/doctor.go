@@ -616,14 +616,22 @@ func doctorChecks() []check {
 					}
 					dir := filepath.Join(dc.projectDir, smithDir, "tools", name)
 					f := finding{Check: "vendored-sha", Scope: scopeProject}
-					src := sourceFiles(t.Runtime, t.Entrypoint, name)
 					if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
 						// bundleHash skips absent files, so a missing dir would
 						// hash as the empty set and read as "sha ≠ pin". Report
-						// the real problem instead.
+						// the real problem instead. Checked before resolving
+						// `sources:`, which would otherwise blame a listed file
+						// for being absent when the whole tree is gone.
 						f.Severity = sevERROR
 						f.Message = name + ": no vendored source at " + dir
 						f.FixHint = "smith use " + t.Source + "@" + t.Version + "  (re-vendor) or restore from git"
+						out = append(out, f)
+						continue
+					}
+					src, serr := vendoredSourceFiles(dir, t, name)
+					if serr != nil {
+						f.Severity = sevERROR
+						f.Message = name + ": " + serr.Error()
 						out = append(out, f)
 						continue
 					}
@@ -707,7 +715,10 @@ func doctorChecks() []check {
 					// Same integrity gate as `smith install`: never build/put on
 					// PATH a vendored tree that no longer matches its pin.
 					dir := filepath.Join(dc.projectDir, smithDir, "tools", name)
-					src := sourceFiles(t.Runtime, t.Entrypoint, name)
+					src, serr := vendoredSourceFiles(dir, t, name)
+					if serr != nil {
+						return fmt.Errorf("%s: %w", name, serr)
+					}
 					sum, herr := bundleHash(dir, src)
 					if herr != nil {
 						return fmt.Errorf("%s: %w", name, herr)

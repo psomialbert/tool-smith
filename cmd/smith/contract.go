@@ -58,6 +58,16 @@ versus the ones that only look real.
 
 - One repo per tool: source + ` + "`manifest.yaml`" + ` + ` + "`selftest.sh`" + ` + ` + "`SKILL.md`" + `.
 - Runtimes: ` + strings.Join(scaffold.Runtimes, " | ") + `.
+- **A tool may have as many source files as it needs.** Declare them in the
+  manifest and they are vendored, hashed and re-verified together:
+
+      sources: [main.go, internal/, templates/]
+
+  A directory is walked recursively. Entries must stay inside the repo; symlinks
+  are refused. Omit ` + "`sources:`" + ` and you get the legacy single-file layout.
+  A multi-file ` + "`go`" + ` tool is built as a package, so it needs a ` + "`go.mod`" + `
+  (` + "`go mod init <name>`" + `) — that file joins the reviewed bundle automatically.
+  Third-party modules still fail closed; multi-file is not multi-dependency.
 - ` + "`SKILL.md`" + ` frontmatter needs a ` + "`description:`" + ` that names the concrete
   situations to reach for the tool. That string is the trigger an agent matches
   on, and it is emitted into agent instruction files — write it for a stranger.

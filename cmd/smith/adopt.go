@@ -133,6 +133,42 @@ func sourceFiles(runtime, entrypoint, name string) []string {
 	return append(src, metaParts...)
 }
 
+// toolSourceFiles returns the file set that makes up a tool's reviewable source:
+// the manifest's `sources:` when it declares them, otherwise the legacy
+// single-file set. dir is the directory holding the tool (a clone at adopt time,
+// the vendored copy afterwards).
+//
+// The legacy path must stay byte-identical: its file list feeds bundleHash, so
+// changing it would change every already-adopted tool's pin and make `smith
+// install` / `smith verify` refuse them all.
+func toolSourceFiles(dir, runtime, entrypoint, name string, sources []string) ([]string, error) {
+	if len(sources) == 0 {
+		return sourceFiles(runtime, entrypoint, name), nil
+	}
+	return resolveSources(dir, sources)
+}
+
+// vendoredSources reads a vendored tool's `sources:` from its own vendored
+// manifest. There is no clone at install/verify time — only the vendored tree —
+// and that manifest is itself inside the hashed bundle, so tampering with its
+// `sources:` list changes the bundle hash and install refuses. A tool whose
+// manifest is absent or unparseable falls back to the legacy set, which is what
+// every pre-`sources:` tool is anyway.
+func vendoredSources(dir string) []string {
+	m, err := scaffold.LoadManifest(dir)
+	if err != nil {
+		return nil
+	}
+	return m.Sources
+}
+
+// vendoredSourceFiles resolves the file set of an already-vendored tool, reading
+// its `sources:` from the vendored manifest. Used by install, verify, doctor and
+// upgrade so all four agree with adopt about what a tool consists of.
+func vendoredSourceFiles(dir string, t ProjTool, name string) ([]string, error) {
+	return toolSourceFiles(dir, t.Runtime, t.Entrypoint, name, vendoredSources(dir))
+}
+
 // shortSha returns the first 12 chars of a hex sha for messages, tolerating a
 // short/empty pin (a hand-edited lockfile) instead of panicking on a slice.
 func shortSha(s string) string {
@@ -166,11 +202,32 @@ func bundleHash(dir string, files []string) (string, error) {
 
 // buildGoTool compiles dir/main.go into outAbs, offline (GOPROXY=off) and
 // without cgo. The Go toolchain is trusted; review reads the vendored main.go.
-func buildGoTool(dir, outAbs string) error {
+// buildGoTool compiles the tool in dir into outAbs, offline and without cgo.
+//
+// A tool declaring `sources:` is built as a PACKAGE (`.`) so its sibling files
+// compile; a legacy single-file tool builds `main.go` explicitly, which is what
+// it has always done. GOPROXY=off is deliberate in both cases: a tool reaching
+// for a third-party module fails closed rather than fetching code at adopt time
+// — the same hazard the python-uv --no-build work closed. Multi-file means
+// multi-file, not multi-dependency.
+func buildGoTool(dir, outAbs string, multiFile bool) error {
 	if _, err := exec.LookPath("go"); err != nil {
 		return fmt.Errorf("go toolchain not found on PATH")
 	}
-	cmd := exec.Command("go", "build", "-trimpath", "-o", outAbs, "main.go")
+	args := []string{"build", "-trimpath", "-o", outAbs}
+	if multiFile {
+		// A package build needs a main module; the file build does not. Say so
+		// plainly rather than letting Go's "cannot find main module" surface,
+		// which doesn't mention smith or `sources:`.
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+			return fmt.Errorf("a multi-file Go tool needs a go.mod (run `go mod init <name>` in the tool repo); " +
+				"it is added to the reviewed+hashed bundle automatically, and third-party requires still fail closed (GOPROXY=off)")
+		}
+		args = append(args, ".")
+	} else {
+		args = append(args, "main.go")
+	}
+	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOPROXY=off", "GOFLAGS=-mod=mod")
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
@@ -831,7 +888,7 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version, expectNam
 	entry := filepath.Join(clone, m.Entrypoint)
 	switch m.Runtime {
 	case "go":
-		if err := buildGoTool(clone, entry); err != nil {
+		if err := buildGoTool(clone, entry, len(m.Sources) > 0); err != nil {
 			return adoptResult{}, fmt.Errorf("go build failed — not adopted: %w", err)
 		}
 	case "python-uv":
@@ -885,7 +942,10 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version, expectNam
 	}
 
 	// Vendor the reviewable SOURCE (not built artifacts) into the project.
-	src := sourceFiles(m.Runtime, m.Entrypoint, m.Name)
+	src, err := toolSourceFiles(clone, m.Runtime, m.Entrypoint, m.Name, m.Sources)
+	if err != nil {
+		return adoptResult{}, err
+	}
 	dst := filepath.Join(smithDir, "tools", m.Name)
 	if err := os.RemoveAll(dst); err != nil {
 		return adoptResult{}, err
@@ -905,7 +965,13 @@ func adoptAtVersion(p config.Paths, clonedURL, displaySource, version, expectNam
 		if f == m.Entrypoint || f == "selftest.sh" {
 			mode = 0o755
 		}
-		if err := os.WriteFile(filepath.Join(dst, f), raw, mode); err != nil {
+		// `sources:` may nest, so create each file's parent. Paths are validated
+		// by resolveSources (no .., no absolute, no symlinks) before reaching here.
+		out := filepath.Join(dst, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+			return adoptResult{}, err
+		}
+		if err := os.WriteFile(out, raw, mode); err != nil {
 			return adoptResult{}, err
 		}
 	}
@@ -937,7 +1003,7 @@ func materializeTool(p config.Paths, name string, t ProjTool, binDir, absBinDir 
 	_ = os.Remove(link)
 	switch t.Runtime {
 	case "go":
-		if err := buildGoTool(dir, filepath.Join(absBinDir, name)); err != nil {
+		if err := buildGoTool(dir, filepath.Join(absBinDir, name), len(vendoredSources(dir)) > 0); err != nil {
 			return fmt.Errorf("%s: go build failed: %w", name, err)
 		}
 	case "python-uv":
@@ -1014,7 +1080,10 @@ func cmdInstall(p config.Paths, args []string) error {
 		dir := filepath.Join(smithDir, "tools", name)
 		// Integrity: vendored source must match the pinned hash (catches a
 		// tampered/edited vendored tree vs the reviewed lockfile).
-		src := sourceFiles(t.Runtime, t.Entrypoint, name)
+		src, serr := vendoredSourceFiles(dir, t, name)
+		if serr != nil {
+			return fmt.Errorf("%s: %w", name, serr)
+		}
 		sum, herr := bundleHash(dir, src)
 		if herr != nil {
 			return fmt.Errorf("%s: %w", name, herr)
