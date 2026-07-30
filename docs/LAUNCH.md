@@ -4,6 +4,14 @@ smith is feature-complete and released. The code side is done; the steps below
 are the human go-live actions, in order. Several GitHub features only become
 available *after* the repo is public, so order matters.
 
+**Status as of 2026-07-30:** steps 1, 2, 3 and 5 are **done** — both repos are
+public, private vulnerability reporting is enabled, Dependabot alerts + security
+updates are on, and the anonymous install path is verified end to end (fetch
+`install.sh`, download assets, verify `SHA256SUMS`, clone, `use` → `install` →
+invoke → `verify` → `lens`, all with no credentials). Remaining: the two optional
+polish items, **4** (GitHub Sponsors) and **6** (repo topics — currently empty;
+the description is set). Kept below as the record of what was done and why.
+
 ## 1. Flip the repos public
 
 ```sh
@@ -54,7 +62,7 @@ The installer downloads release assets over plain https once the repo is public
 
 ## What's shipped
 
-Released through **v2.13.0**. Command surface: `new · publish · search · use ·
+Released through **v2.13.1**. Command surface: `new · publish · search · use ·
 use --mise · review · install · upgrade · diff · verify · lens · list ·
 allowlist (keygen/sign/verify) · migrate · doctor`.
 
