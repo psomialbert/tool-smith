@@ -133,6 +133,18 @@ auto-detection entirely; an unknown name is a hard config error, while a
 target that merely fails to write only warns — `smith install` still
 succeeds for the rest.
 
+The older `skills.export: never` still works and now opts out of **all**
+emission, not just the skills dir — it predates agent targets, when that dir
+was the only advertisement path, so it reads as "don't advertise my tools".
+Use `agents.targets` when you want the finer split (skip the machine-global
+skills dir, keep the project-scoped blocks); it wins over `skills.export`.
+
+Note that `config.yaml` is **per-machine**, so `targets: []` opts *you* out,
+not your repo — it can't disable emission on behalf of CI or your
+contributors. The project-scoped control is the files themselves: the
+`*-md` targets only fire when `AGENTS.md`/`CLAUDE.md` already exists, so a
+project that shouldn't carry a managed block simply shouldn't have one.
+
 `smith use` runs the tool's self-test sandboxed and writes a reviewable diff;
 it never grants trust on its own — the tool becomes PATH-available only once
 the adoption is committed/merged and `smith install` runs.

@@ -632,15 +632,29 @@ func TestResolveTargetsDefaults(t *testing.T) {
 
 // Legacy knob: `skills.export: never` predates agents.targets and must keep
 // disabling the Claude skills export — and only that target.
+// `skills.export: never` predates agent targets, when it was the only
+// advertisement path — so its author meant "don't advertise my tools to agents".
+// It must opt out of ALL emission, not just the skills dir: honoring only the
+// narrow reading would newly write a managed block into a git-tracked AGENTS.md
+// for someone who had already opted out.
 func TestResolveTargetsHonorsLegacySkillsExportNever(t *testing.T) {
 	got := resolveTargets(config.FileConfig{Skills: config.SkillsConfig{Export: "never"}})
-	for _, n := range got {
-		if n == "claude" {
-			t.Error("skills.export: never must drop the claude target")
-		}
+	if len(got) != 0 {
+		t.Errorf("skills.export: never must opt out of every target, got %v", got)
 	}
-	if len(got) == 0 {
-		t.Error("the project-scoped targets should survive skills.export: never")
+}
+
+// The finer distinction (skip the machine-global skills dir, keep the
+// project-scoped blocks) is still expressible — explicitly, via agents.targets,
+// which wins outright over the legacy knob.
+func TestResolveTargetsExplicitOverridesSkillsExportNever(t *testing.T) {
+	fc := config.FileConfig{
+		Skills: config.SkillsConfig{Export: "never"},
+		Agents: config.AgentsConfig{Targets: []string{"agents-md", "claude-md"}},
+	}
+	got := resolveTargets(fc)
+	if len(got) != 2 || got[0] != "agents-md" || got[1] != "claude-md" {
+		t.Fatalf("explicit targets must win over skills.export: never, got %v", got)
 	}
 }
 
