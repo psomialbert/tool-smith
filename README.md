@@ -128,6 +128,27 @@ smith search json                                        # discover more by topi
 The safety model is the division of labor: an **agent authors and proposes**,
 a **human reviews the PR and adopts**.
 
+**`smith contract`** prints the authoring contract — required CLI behavior, the
+self-test rules, and which limits are load-bearing versus merely unbuilt. Point
+any agent at it (`smith contract --json` for machines). It exists because the
+cli-creator skill installs out-of-band: an agent holding only the binary used to
+have no way to learn the contract except being handed a path to this repo by
+hand, where the most authoritative-looking file was a retired v1 spec.
+
+Two things it says that are worth repeating here, because guessing wrong about
+them leads to real architectural detours:
+
+- **The sandbox binds the self-test, not the tool.** It applies at adopt time
+  only. After `smith install`, a tool is a plain executable on PATH with your
+  full privileges — it may download large files, start a daemon, use a local
+  model. The only requirement is that `selftest.sh` proves something meaningful
+  *offline*. (Caveat worth knowing: smith pins your vendored source, not what
+  your tool fetches later.)
+- **Heavy systems get a thin client.** If the real work is a daemon or a
+  resident model, ship that as its own ordinary project and make the smith tool
+  a thin `--json` client to it. The client is what gets adopted and reviewed.
+  That's the sanctioned shape, not a workaround.
+
 | Agents may | Humans own |
 |---|---|
 | `new` (author), `use`/`upgrade` (propose adoption), `diff`/`review`/`lens` (read), `search`, `list`, `doctor`, `install` | reviewing + **merging the adoption PR** (the trust decision) |

@@ -11,6 +11,12 @@ The counterpart to `skill-creator`, for tools. You (the agent) **author**; a
 human **reviews and merges the adoption** into a project. The review is the
 trust gate — never try to skip it.
 
+`smith contract` prints the same contract this skill teaches, straight from the
+binary. Run it if you need the authoritative version, and prefer it over any
+other file in the smith repo — `docs/history/` and `ROADMAP.md` there describe a
+**retired** v1 model (`register`, `promote`, Tier 0, a signed index), and an
+agent has already been misled by them.
+
 ## Why build a tool instead of writing a script
 
 A one-off script you paste into a session is gone next time — re-derived,
