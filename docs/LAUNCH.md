@@ -62,9 +62,16 @@ The installer downloads release assets over plain https once the repo is public
 
 ## What's shipped
 
-Released through **v2.13.1**. Command surface: `new · publish · search · use ·
+Released through **v2.14.0**. Command surface: `new · publish · search · use ·
 use --mise · review · install · upgrade · diff · verify · lens · list ·
-allowlist (keygen/sign/verify) · migrate · doctor`.
+allowlist (keygen/sign/verify) · migrate · doctor` — unchanged since v2.13.x;
+multi-agent discovery added no new commands.
+
+**Multi-agent discovery** (v2.14.0) means smith is no longer Claude-specific:
+`smith install` emits the adopted-tool index through an `agentTarget` registry —
+the machine-global Claude skills export plus a managed block in whichever of
+`AGENTS.md` / `CLAUDE.md` already exists. Selected by the `agents.targets` config
+key; reported by the `agents-block` doctor check.
 
 Remaining ideas live in `docs/superpowers/specs/2026-07-21-smith-feature-landscape.md`
 (watch-list: sandbox v2, tool composition, org catalog, monorepo, usage-aware
