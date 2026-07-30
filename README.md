@@ -151,7 +151,7 @@ them leads to real architectural detours:
 
 | Agents may | Humans own |
 |---|---|
-| `new` (author), `use`/`upgrade` (propose adoption), `diff`/`review`/`lens` (read), `search`, `list`, `doctor`, `install` | reviewing + **merging the adoption PR** (the trust decision) |
+| `new` (author), `use`/`upgrade` (propose adoption), `diff`/`review`/`lens`/`contract` (read), `search`, `list`, `doctor`, `install` | reviewing + **merging the adoption PR** (the trust decision) |
 
 **Discovering a project's tools.** `smith lens` prints an agent-facing index of
 the tools *this* project has adopted — each tool's trigger and how to invoke
