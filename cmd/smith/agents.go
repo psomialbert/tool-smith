@@ -249,17 +249,26 @@ func upsertManagedBlock(path, block string) error {
 // the two knobs cannot contradict each other:
 //
 //  1. agents.targets set (even to an empty list) wins entirely.
-//  2. Otherwise every target is eligible (each still self-detects), minus the
-//     machine-scoped claude export when the legacy `skills.export: never` is set.
+//  2. Otherwise, the legacy `skills.export: never` opts out of ALL emission.
+//  3. Otherwise every target is eligible (each still self-detects).
+//
+// Rule 2 reads `never` as the intent its author had — "don't advertise my tools
+// to agents" — rather than the narrower "don't write the skills dir". Before
+// agent targets existed those meant the same thing, so honoring only the narrow
+// reading would newly write a managed block into a git-tracked AGENTS.md /
+// CLAUDE.md for someone who had already opted out. Erring toward writing less is
+// the safe direction, and anyone who wants the finer distinction (skip the
+// machine-global skills dir, keep the project-scoped blocks) can say so
+// precisely with `agents.targets`, which wins outright.
 func resolveTargets(fc config.FileConfig) []string {
 	if fc.Agents.Targets != nil {
 		return fc.Agents.Targets
 	}
+	if fc.Skills.Export == "never" {
+		return nil
+	}
 	var out []string
 	for _, t := range agentTargets() {
-		if t.name == "claude" && fc.Skills.Export == "never" {
-			continue
-		}
 		out = append(out, t.name)
 	}
 	return out

@@ -186,11 +186,26 @@ silently stripped as "retired" by `smith migrate`. Covered by a test.
 Precedence, stated explicitly so the two knobs cannot contradict:
 
 1. If `agents.targets` is set, it wins entirely.
-2. Otherwise defaults apply (auto-detect), and a legacy `skills.export: never`
-   removes **only** the `claude` target.
+2. Otherwise a legacy `skills.export: never` opts out of **all** emission.
+3. Otherwise defaults apply (auto-detect).
 
-`targets: []` doubles as the escape hatch for anyone whose CI fails on a dirty
-tree.
+**Amended after implementation (rule 2).** The original design had `never` remove
+only the `claude` target. That was wrong: `skills.export` predates agent targets,
+when the skills dir was the *only* advertisement path, so its author meant "don't
+advertise my tools to agents". Honoring only the narrow reading would newly write
+a managed block into a git-tracked `AGENTS.md`/`CLAUDE.md` for someone who had
+already opted out. Writing less is the safe direction, and the finer distinction
+(skip the machine-global skills dir, keep the project-scoped blocks) is still
+expressible precisely via `agents.targets`, which wins outright.
+
+`targets: []` disables emission — but note the scope limit: `config.yaml` lives in
+`$SMITH_HOME`, so this is a **per-machine** setting. A *project* cannot use it to
+opt out on behalf of its CI or its contributors; each machine would have to set
+it. Project-scoped configuration does not exist in smith today (`.smith/tools.yaml`
+is a lockfile, not config), so adding it is a separate design. Until then, a
+project that must not carry a managed block should simply not have an `AGENTS.md`
+or `CLAUDE.md` — the `*-md` targets only fire when the file already exists, which
+is the project-scoped control that does work.
 
 ### 7. Failure and staleness behavior
 
