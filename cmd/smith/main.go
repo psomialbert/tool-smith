@@ -65,6 +65,8 @@ func main() {
 		err = cmdVerify(paths, args)
 	case "lens":
 		err = cmdLens(paths, args)
+	case "contract":
+		err = cmdContract(paths, args)
 	case "list", "status":
 		err = cmdList(paths, args)
 	case "allowlist":
@@ -118,6 +120,10 @@ Usage:
                                  gate); --frozen also fails on un-pinned dirs
   smith lens [--json]            agent-facing index of this project's tools
                                  (triggers + how to invoke); run to see the toolbox
+  smith contract [--json]        the tool-authoring contract: required CLI
+                                 behavior, what the adopt-time sandbox does and
+                                 does NOT constrain, and which limits are
+                                 load-bearing vs merely unbuilt
   smith list [--json]            list tools adopted in this project (alias: status)
   smith allowlist [keygen|sign <file>|verify]  show the org adoption policy;
                                  subcommands manage an ed25519-signed allowlist

@@ -101,9 +101,22 @@ merging a change that touches the skill or the binary:
 3. `gh release create v<x.y.z> ... dist/smith-* dist/cli-creator-SKILL.md dist/SHA256SUMS`
    (`scripts/install.sh` verifies the downloaded binary against `SHA256SUMS`).
 
-Historical `register`/`promote` mentions in `ROADMAP.md` and `toolsmith-spec.md`
-are accurate history/original-design docs — leave them; they are not
-agent-loaded.
+Historical `register`/`promote` mentions in `ROADMAP.md` and
+`docs/history/2026-07-14-original-v1-spec-RETIRED.md` are accurate history —
+leave the content, but **do not assume "not agent-loaded" keeps them harmless.**
+That assumption failed: the v1 spec used to sit in the repo root as
+`toolsmith-spec.md` with a header telling agents to build from it, and an agent
+sent to this repo to learn smith's conventions absorbed the retired model. Hence
+the move to `docs/history/`, the RETIRED filename, and the warning header. Any
+doc describing a retired model needs all three.
+
+**Keep `smith contract` true.** `cmdContract` (`cmd/smith/contract.go`) is the
+in-band, authoritative answer for an agent that has the binary but not the
+cli-creator skill. If you change a runtime, the self-test's sandbox, the CLI
+contract, or which limits are load-bearing, update it — `contract_test.go` pins
+the runtime list against `scaffold.Runtimes` and asserts the sandbox-scope and
+load-bearing-vs-unbuilt sections stay present, but it cannot check prose you
+forgot to change.
 
 ## Repo conventions
 

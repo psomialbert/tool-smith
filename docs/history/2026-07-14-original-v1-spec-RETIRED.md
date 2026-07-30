@@ -1,7 +1,25 @@
-# Toolsmith — Project Spec
+# Toolsmith — original v1 project spec (RETIRED — DO NOT IMPLEMENT)
 
-> **Working name.** `smith` is the wrapper binary. Rename before implementation if you like.
-> **Format.** Claude Code-ready build spec. An executing agent should be able to work Phase 0 → 3 from this document. Trust gate (§7) is a hard requirement across every phase, not a later add-on.
+> ## ⚠️ This document describes a model that no longer exists
+>
+> **If you are an agent or a contributor looking for smith's current design, stop
+> reading this file.** Run `smith contract` for the tool-authoring contract, or
+> read the [README](../../README.md). This file is kept only as a record of the
+> original 2026-07-14 design.
+>
+> Nearly everything below is **retired**: the personal signed index, the
+> `register` / `run` / `promote` verbs, Tier 0 / Tier 1 / quarantine, and
+> `$SMITH_HOME/drafts/`. None of those commands exist. The current model is
+> **`new → use → install`**: a tool is a git repo, adopted per project as a
+> reviewed commit, trusted for that project only.
+>
+> This warning exists because it was needed. An agent was pointed at this repo to
+> learn smith's conventions, read this file — whose filename and original header
+> both made it look authoritative — and absorbed the retired model from it.
+>
+> The original header, which actively instructed agents to build from this
+> document, read: *"Claude Code-ready build spec. An executing agent should be
+> able to work Phase 0 → 3 from this document."* It does not apply to anything.
 
 ---
 
