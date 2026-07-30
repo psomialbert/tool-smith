@@ -1,0 +1,262 @@
+# Multi-agent discovery targets
+
+Date: 2026-07-29
+Status: approved design, pre-implementation
+
+## Problem
+
+smith's *core* is already agent-agnostic: a tool is a CLI on the project PATH
+honoring `<tool> --json`, and `smith lens` prints a neutral markdown/JSON index
+any agent can read. What is Claude-specific is the layer that **advertises**
+adopted tools to an agent:
+
+| # | Claude-ism | Where |
+|---|---|---|
+| 1 | export target `~/.claude/skills/<name>/SKILL.md` — one dir, one format | `internal/config/config.go:83`, `cmd/smith/adopt.go:1081` |
+| 2 | `cli-creator` installed into `$HOME/.claude/skills/` | `scripts/install.sh:25` |
+| 3 | `SKILL.md` frontmatter *is* Claude's skill format | `internal/scaffold/templates/SKILL.md` |
+| 4 | onboarding snippet names `~/.claude/CLAUDE.md` | `README.md:109` |
+
+An agent that isn't Claude Code gets nothing automatic. It can run `smith lens`,
+but only if it already knows to — nothing in the project tells it so.
+
+There is also a **scope mismatch** worth naming, because it shapes the design.
+Claude skills are *machine-global* with progressive disclosure; most other
+agents read *project-scoped* instruction files. smith's entire model is
+per-project adoption, so project-scoped emission fits smith better than the
+global skills dir does.
+
+## Goal / core property
+
+A project's adopted tools are discoverable, with their triggers and correct
+invocation, by whatever agent is working in that project — without per-user
+setup, and without smith inventing files the user did not ask for.
+
+Emission is **derived state**: it is regenerated from `.smith/tools.yaml` plus
+the vendored `SKILL.md`s, never hand-maintained, and can always be recomputed.
+
+Non-goals (deliberately deferred):
+
+- **Authoring-side generalization** (shipping `cli-creator` guidance to
+  non-Claude agents). Discovery first; authoring rides the same registry seam
+  later.
+- **Fixing the machine-global Claude skills export.** See Known limits.
+- Renaming `SKILL.md` in tool repos. It is the canonical trigger source; every
+  published tool repo carries one, and renaming breaks all of them for no gain.
+
+## Design
+
+### 1. One shared tool index
+
+`smith lens` currently builds its entry list inline in `cmdLens`; `cmdInstall`
+separately hardcodes the Claude skills copy. Extract lens's loop into a shared
+
+```go
+func projectToolIndex() ([]toolEntry, error)
+```
+
+returning name, version, runtime, external, invoke and trigger — reusing the
+existing `skillDescription()` (already shared by `lens` and `doctor`) rather
+than reparsing frontmatter.
+
+`smith lens`, the Claude export, and the new emitters all consume it. The
+consequence that matters: **an emitted table cannot disagree with `smith lens`**,
+because they are the same data.
+
+### 2. Agent target registry
+
+New file `cmd/smith/agents.go`. `adopt.go` is already ~1200 lines and owns the
+adopt pipeline; emission is a separate concern with its own tests.
+
+Registry shaped like the existing `doctorChecks()` — adding a target is one
+entry, not a new code path:
+
+```go
+// agentTarget renders the project's adopted-tool index into one agent's native
+// discovery format. emit MUST be idempotent: emitting twice over the same index
+// leaves the file byte-identical.
+type agentTarget struct {
+	name   string               // config id: "claude" | "agents-md" | "claude-md"
+	scope  string               // scopeMachine | scopeProject (doctor's existing constants)
+	detect func(emitCtx) bool   // does this target apply here?
+	emit   func(emitCtx, []toolEntry) error
+}
+
+// emitCtx is what an emitter needs: resolved paths (for SkillsDir), the loaded
+// file config, and the project root (the dir holding .smith/).
+type emitCtx struct {
+	p          config.Paths
+	fc         config.FileConfig
+	projectDir string
+}
+```
+
+`scope` is a plain `string` using doctor's existing `scopeMachine`/`scopeProject`
+constants (`doctor.go:22`), matching how `check.scope` is already typed.
+
+`scope` is recorded because the targets genuinely differ, and leaving that
+implicit is how target #3 inherits a bug (see Known limits).
+
+Three targets:
+
+| target | scope | detect | emit |
+|---|---|---|---|
+| `claude` | machine | always (preserves today's default) | copy each `SKILL.md` → `<skillsDir>/<name>/SKILL.md` — byte-for-byte current behavior |
+| `agents-md` | project | `./AGENTS.md` exists | upsert managed block |
+| `claude-md` | project | `./CLAUDE.md` exists | upsert managed block |
+
+`claude-md` is nearly free: `upsertManagedBlock` is path-agnostic, so it is the
+same emitter with a different filename. It also lets us avoid depending on
+whether a given Claude Code version reads `AGENTS.md`.
+
+**smith never creates these files.** Emission updates a file that already
+exists; `smith doctor` reports a missing one and `--fix` creates it on request.
+
+### 3. The emitted block
+
+```markdown
+<!-- smith:begin — generated by `smith install`; edits inside are overwritten -->
+## Project tools (smith)
+
+These are on PATH for this project. Run `smith lens` for the always-fresh index.
+
+| tool | version | invoke | trigger |
+|---|---|---|---|
+| calc | v0.1.1 | `calc --json …` | Evaluate an arithmetic/logic expression safely… |
+| pup | v0.9.0 | `pup` (external, unreviewed) | Datadog CLI… |
+<!-- smith:end -->
+```
+
+The `invoke` column and the external marker are **required, not cosmetic**.
+`lens` deliberately distinguishes vendored tools from `--mise` externals:
+externals are invoked as bare `name` (they never promised `--json`) and carry
+"no source reviewed". A blanket `<tool> --json` header would be wrong for them
+*and* would tell an agent an unreviewed third-party CLI is equivalent to a
+reviewed, vendored one. Per-row invoke text comes straight from
+`projectToolIndex()`, so the distinction survives by construction.
+
+### 4. `upsertManagedBlock(path, content) error`
+
+The one unit doing file surgery, so it is small and directly testable:
+
+1. `Lstat` the path. If it is a **symlink, refuse and warn** — `writeFileAtomic`
+   renames into place, which would replace the symlink instead of writing
+   through it. Precedent: `migrate.go:83`.
+2. Count `smith:begin` markers. **More than one → refuse and warn** rather than
+   guess which to overwrite and mangle the file.
+3. Replace between markers; append the block (preceded by one blank line) when
+   absent.
+4. Write via the existing `writeFileAtomic`.
+
+Content outside the markers is never touched. Trailing-newline handling must be
+stable, or every install churns the file.
+
+### 5. `sanitizeTrigger(s) string`
+
+A tool's description becomes *agent instructions*, so it is sanitized before
+emission:
+
+- collapse newlines/runs of whitespace to single spaces (one table row)
+- escape `|` (table structure)
+- cap at 500 characters, ellipsized — long enough for a real trigger, short
+  enough that one tool cannot dominate the agent's context
+- **strip HTML comment syntax** (`<!--` / `-->`)
+
+The last is a security requirement, not tidiness: a description containing a
+literal `<!-- smith:end -->` would otherwise terminate the managed block early
+and inject content *outside* it — where regeneration never overwrites it again,
+turning a one-line description into a permanent foothold in the agent's
+instruction file. Belongs in `security_test.go` beside the existing injection
+tests.
+
+This narrows, not replaces, the existing trust boundary: `SKILL.md` is vendored
+and human-reviewed in the adoption PR.
+
+### 6. Config
+
+```yaml
+agents:
+  targets: [claude, agents-md]   # omit for auto-detect; [] emits nothing
+```
+
+`agents` is a new top-level key, so it **must** be added to `v2ConfigKeys` in
+`cmd/smith/migrate.go`. That map is an allowlist: a live key missing from it is
+silently stripped as "retired" by `smith migrate`. Covered by a test.
+
+Precedence, stated explicitly so the two knobs cannot contradict:
+
+1. If `agents.targets` is set, it wins entirely.
+2. Otherwise defaults apply (auto-detect), and a legacy `skills.export: never`
+   removes **only** the `claude` target.
+
+`targets: []` doubles as the escape hatch for anyone whose CI fails on a dirty
+tree.
+
+### 7. Failure and staleness behavior
+
+Emission failures **warn; they never fail the install** — matching the existing
+skill export at `adopt.go:1083`. A read-only `AGENTS.md` must not break
+`smith install`.
+
+`smith upgrade` does not call install (it prints a hint at `upgrade.go:227`), so
+the block is stale between upgrade and install — exactly as the Claude export
+already is. New doctor check `agents-block` (`scopeProject`), registered in the
+`doctorChecks()` registry as a diagnose/apply pair:
+
+| state | severity | `--fix` |
+|---|---|---|
+| block present and current | OK | — |
+| block missing or stale | WARN | regenerate |
+| neither `AGENTS.md` nor `CLAUDE.md` exists | INFO | create **`AGENTS.md`** |
+
+When neither file exists, `--fix` creates `AGENTS.md` specifically — the
+cross-agent convention, and the choice that serves an unknown agent best. It
+never creates `CLAUDE.md`, which would presume Claude.
+
+When **both** files exist, both targets fire and each gets the block. That is
+intended, not redundant: Claude reads `CLAUDE.md`, other agents read
+`AGENTS.md`, and a project carrying both wants both populated.
+
+Staleness is defined as *rendered output ≠ file content*, so there is no second
+heuristic to drift from the emitter.
+
+## Testing
+
+- `upsertManagedBlock`: create, replace, idempotent, preserves surrounding
+  content, refuses symlink, refuses duplicate markers.
+- `sanitizeTrigger`: newlines, pipes, length cap, forged `smith:end`
+  (`security_test.go`).
+- Emitter: rows match `smith lens` for the same lockfile, including an external
+  `--mise` entry marked unreviewed with bare invoke.
+- **Double install is byte-identical** (ordering already deterministic via
+  `sortedToolNames`).
+- Back-compat: `skills.export: never` still disables the Claude export;
+  `agents.targets` overrides it.
+- `smith migrate` preserves an `agents:` key (guards the `v2ConfigKeys` trap).
+- Doctor: missing → INFO, stale → WARN + fix, current → OK.
+
+`scripts/adopt-e2e.sh`'s fixture project has no `AGENTS.md`, so `detect` returns
+false and the e2e flow is unaffected.
+
+## Known limits
+
+**The Claude skills export is machine-global.** `smith install` in project A
+writes `~/.claude/skills/<name>/SKILL.md` machine-wide. In project B, which
+never adopted that tool, the agent can read the skill, match its trigger, invoke
+the tool, and get command-not-found; un-adopting from A leaves the global skill
+behind. It is a stale cross-project *advertisement*, not an execution or trust
+breach — the tool is only on PATH where it was adopted and installed.
+
+Left as-is deliberately: it works today and changing it breaks existing users.
+`scope` on `agentTarget` makes the distinction explicit, and `claude-md` gives
+Claude users a project-scoped path without disturbing the global export.
+
+## Docs to update on implementation
+
+Per the `CLAUDE.md` sync checklist:
+
+- `README.md` — the agent section and the `~/.claude/CLAUDE.md` snippet at :109
+- `skills/cli-creator/SKILL.md` — if the adopt flow's output changes
+- `SECURITY.md` — sanitization boundary and the injection surface at :49
+- `cmd/smith/doctor.go` — the new check in the registry
+- `cmd/smith/migrate.go` — `v2ConfigKeys`

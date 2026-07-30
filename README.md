@@ -67,6 +67,9 @@ so authoring agents get the CLI contract without setup. Prebuilt binaries
 (darwin/linux × arm64/amd64) are attached to each
 [release](https://github.com/psomialbert/tool-smith/releases).
 
+`smith install` separately keeps a project's adopted-tool index visible to
+whatever agent is working there — see *Using smith with agents* below.
+
 ## Quickstart
 
 ```sh
@@ -98,24 +101,41 @@ a **human reviews the PR and adopts**.
 | `new` (author), `use`/`upgrade` (propose adoption), `diff`/`review`/`lens` (read), `search`, `list`, `doctor`, `install` | reviewing + **merging the adoption PR** (the trust decision) |
 
 **Discovering a project's tools.** `smith lens` prints an agent-facing index of
-the tools *this* project has adopted — each tool's trigger and how to invoke it.
-Unlike the globally-exported per-tool skills, it's project-scoped and always
-fresh. Recommend adding to a project's agent instructions (e.g. `AGENTS.md`):
-"run `smith lens` to see this project's adopted tools."
+the tools *this* project has adopted — each tool's trigger and how to invoke
+it. It's project-scoped and always fresh (unlike the globally-exported
+per-tool skills), so it's what an agent should run when it needs the current
+truth.
+
+`smith install` also keeps that same index visible without anyone having to
+run `lens` first: it refreshes a smith-managed block (tool name, version,
+invoke form, trigger) inside **whichever of `AGENTS.md` / `CLAUDE.md` already
+exists** in the project root — content outside the block is left alone.
+smith never creates either file; if neither exists, an agent has nothing to
+read until one does — `smith doctor --fix` creates the first `*-md` target
+that's selected (`AGENTS.md` by default; `CLAUDE.md` only if `agents.targets`
+excludes `agents-md`; nothing if it excludes both) — or just add one by hand.
+Re-running `smith install` is idempotent — an up-to-date block produces no
+diff, so it's safe to run in CI without dirtying a git-tracked file.
+
+Which targets `smith install` writes to is configurable in
+`$SMITH_HOME/config.yaml`:
+
+```yaml
+agents:
+  targets: [claude, agents-md]   # or claude-md; [] disables emission entirely
+```
+
+Leaving `agents.targets` unset auto-detects: `smith install` emits to
+whichever of the three targets apply (`claude` — the machine-global per-tool
+skill export — plus `agents-md`/`claude-md` for whichever files already
+exist). Setting `targets` to an explicit list — including `[]` — overrides
+auto-detection entirely; an unknown name is a hard config error, while a
+target that merely fails to write only warns — `smith install` still
+succeeds for the rest.
 
 `smith use` runs the tool's self-test sandboxed and writes a reviewable diff;
 it never grants trust on its own — the tool becomes PATH-available only once
-the adoption is committed/merged and `smith install` runs. To make agents
-smith-aware, add to their instructions (e.g. `~/.claude/CLAUDE.md`):
-
-```markdown
-# smith (agent tools)
-Reusable CLIs live as git repos, adopted per project. Author one with
-`smith new <name>`, iterate + self-test, make it a repo. Adopt an existing
-tool with `smith use <repo>@<ver>` (writes a reviewable .smith/ diff) then
-`smith install`. Do NOT merge your own adoption PR — a human reviews it.
-See the cli-creator skill for the agent-friendly CLI contract.
-```
+the adoption is committed/merged and `smith install` runs.
 
 ## Runtimes
 
@@ -185,7 +205,7 @@ mise.local.toml            activation: puts .smith/bin on PATH (machine-specific
 ```
 
 `SMITH_HOME` (default `~/.toolsmith`) is small now — just generated sandbox
-profiles and `config.yaml` (review + skills settings). The code repo (this
+profiles and `config.yaml` (review + skills + agent target settings). The code repo (this
 directory) is separate.
 
 ## Not in scope (v1)

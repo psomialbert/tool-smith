@@ -57,6 +57,8 @@ type FileConfig struct {
 	// adopted with `smith use`. Lives in $SMITH_HOME/config.yaml (provisioned
 	// per machine, not editable in a project PR). Absent = adopt anything.
 	Allowlist AllowlistConfig `yaml:"allowlist,omitempty"`
+	// Agents selects which agent discovery targets `smith install` emits to.
+	Agents AgentsConfig `yaml:"agents,omitempty"`
 }
 
 type AllowlistConfig struct {
@@ -68,6 +70,13 @@ type AllowlistConfig struct {
 type SkillsConfig struct {
 	Dir    string `yaml:"dir,omitempty"`    // default ~/.claude/skills
 	Export string `yaml:"export,omitempty"` // always (default) | never
+}
+
+// AgentsConfig selects which agent discovery targets `smith install` emits to.
+// Targets nil (key absent) = auto-detect all; non-nil but empty (`targets: []`)
+// = emit nothing. That distinction is load-bearing, so don't collapse it.
+type AgentsConfig struct {
+	Targets []string `yaml:"targets,omitempty"`
 }
 
 // SkillsDir resolves the skills directory: $SMITH_SKILLS_DIR (also honored by

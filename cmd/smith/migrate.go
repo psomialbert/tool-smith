@@ -25,7 +25,7 @@ var v1HomeArtifacts = []string{
 // other key (e.g. v1's `transport:`, `signing:`) is retired and stripped on
 // migrate. Keep in sync with config.FileConfig.
 var v2ConfigKeys = map[string]bool{
-	"editor": true, "review": true, "skills": true, "allowlist": true,
+	"editor": true, "review": true, "skills": true, "allowlist": true, "agents": true,
 }
 
 // cmdMigrate performs machine-level v1 → v2 cleanup of SMITH_HOME: it moves

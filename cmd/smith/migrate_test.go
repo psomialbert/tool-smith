@@ -210,3 +210,30 @@ func TestCmdMigrateBacksUpV1Artifacts(t *testing.T) {
 		t.Fatalf("second migrate run errored: %v", err)
 	}
 }
+
+// agents: is a live config key. If it's missing from v2ConfigKeys, `smith
+// migrate` strips it as "retired" — silently discarding a user's target
+// selection. This test is the guard for that trap.
+func TestMigratePreservesAgentsKey(t *testing.T) {
+	p := testPaths(t)
+	cfg := filepath.Join(p.Home, "config.yaml")
+	body := "agents:\n    targets:\n        - agents-md\neditor: vim\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmdMigrate(p, []string{"--quiet"}); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "agents:") {
+		t.Errorf("migrate stripped the live agents key:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "agents-md") {
+		t.Errorf("migrate dropped the targets value:\n%s", raw)
+	}
+}
